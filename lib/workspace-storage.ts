@@ -14,6 +14,7 @@ export type WorkspaceSnapshot = {
   sidebarWidth?: number
   searchOpen: boolean
   elevationOpen: boolean
+  autoRouting?: boolean
 }
 
 let databasePromise: Promise<IDBDatabase> | null = null
@@ -78,7 +79,6 @@ function isTrack(value: unknown): value is GpxTrack {
     typeof track.color === "string" &&
     typeof track.visible === "boolean" &&
     Array.isArray(track.coordinates) &&
-    track.coordinates.length >= 2 &&
     track.coordinates.every(isCoordinate)
   )
 }
@@ -101,7 +101,9 @@ function isWorkspaceSnapshot(value: unknown): value is WorkspaceSnapshot {
       (typeof workspace.sidebarWidth === "number" &&
         Number.isFinite(workspace.sidebarWidth))) &&
     typeof workspace.searchOpen === "boolean" &&
-    typeof workspace.elevationOpen === "boolean"
+    typeof workspace.elevationOpen === "boolean" &&
+    (workspace.autoRouting === undefined ||
+      typeof workspace.autoRouting === "boolean")
   )
 }
 

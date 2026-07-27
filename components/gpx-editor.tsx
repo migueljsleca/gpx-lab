@@ -14,6 +14,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  LoaderCircle,
   MousePointer2,
   MoreHorizontal,
   PanelLeftClose,
@@ -46,20 +47,22 @@ import {
 } from "@/components/ui/tooltip"
 import {
   calculateTrackStats,
+  cleanTrackCoordinates,
   parseGpx,
   serializeTrackToGpx,
+  simplifyTrackCoordinates,
   trackColors,
+  type EditorTool,
   type GpxTrack,
+  type TrackCoordinate,
 } from "@/lib/gpx"
+import { getAutoRoute } from "@/lib/routing"
 import { cn } from "@/lib/utils"
 import {
   loadWorkspace,
   saveWorkspace,
   type WorkspaceSnapshot,
 } from "@/lib/workspace-storage"
-
-type EditorTool =
-  "select" | "draw" | "split" | "crop" | "simplify" | "clean" | "merge"
 
 const editorTools: {
   id: EditorTool
@@ -79,7 +82,7 @@ const trackDragType = "application/x-gpx-lab-track"
 const trackContextItemClass =
   "flex h-8 select-none items-center gap-2 rounded-md px-2 outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/[0.08] data-[highlighted]:text-foreground"
 const floatingControlFrameClass =
-  "h-10 rounded-[8px] border border-white/[0.08] bg-[#181b20]/94 p-1 shadow-2xl backdrop-blur-md"
+  "h-10 rounded-[8px] border border-white/[0.08] bg-[#101010] p-1 shadow-2xl backdrop-blur-md"
 const pillControlButtonClass =
   "hover:bg-white/[0.1] active:bg-white/[0.1] dark:hover:bg-white/[0.1] dark:active:bg-white/[0.1]"
 const sidebarMinWidth = 260
@@ -111,6 +114,66 @@ function clampSidebarWidth(width: number) {
   return Math.min(sidebarMaxWidth, Math.max(sidebarMinWidth, width))
 }
 
+function cloneTracks(tracks: GpxTrack[]) {
+  return tracks.map((track) => ({
+    ...track,
+    coordinates: track.coordinates.map(
+      (coordinate) => [...coordinate] as TrackCoordinate
+    ),
+  }))
+}
+
+function mergeCoordinates(tracks: GpxTrack[]) {
+  const [first, ...remainingTracks] = tracks
+  if (!first) {
+    return []
+  }
+
+  let merged = first.coordinates.slice()
+  const remaining = remainingTracks.map((track) => track.coordinates.slice())
+
+  while (remaining.length > 0) {
+    const mergedEnd = merged.at(-1)
+    if (!mergedEnd) {
+      merged = remaining.shift() ?? []
+      continue
+    }
+
+    let closestTrackIndex = 0
+    let reverseClosestTrack = false
+    let closestDistance = Number.POSITIVE_INFINITY
+
+    remaining.forEach((coordinates, index) => {
+      const start = coordinates[0]
+      const end = coordinates.at(-1)
+      if (!start || !end) {
+        return
+      }
+
+      const startDistance = distanceBetweenTrackCoordinates(mergedEnd, start)
+      const endDistance = distanceBetweenTrackCoordinates(mergedEnd, end)
+      if (startDistance < closestDistance) {
+        closestDistance = startDistance
+        closestTrackIndex = index
+        reverseClosestTrack = false
+      }
+      if (endDistance < closestDistance) {
+        closestDistance = endDistance
+        closestTrackIndex = index
+        reverseClosestTrack = true
+      }
+    })
+
+    const [nextCoordinates] = remaining.splice(closestTrackIndex, 1)
+    const orientedCoordinates = reverseClosestTrack
+      ? nextCoordinates.slice().reverse()
+      : nextCoordinates
+    merged = [...merged, ...orientedCoordinates]
+  }
+
+  return cleanTrackCoordinates(merged)
+}
+
 export function GpxEditor() {
   const [tracks, setTracks] = React.useState<GpxTrack[]>([])
   const [folders, setFolders] = React.useState<string[]>([])
@@ -122,12 +185,21 @@ export function GpxEditor() {
   const [searchOpen, setSearchOpen] = React.useState(false)
   const [query, setQuery] = React.useState("")
   const [elevationOpen, setElevationOpen] = React.useState(false)
+  const [autoRouting, setAutoRouting] = React.useState(true)
+  const [routingPending, setRoutingPending] = React.useState(false)
   const [fileDragActive, setFileDragActive] = React.useState(false)
   const [notice, setNotice] = React.useState<string | null>(null)
+  const [undoStack, setUndoStack] = React.useState<GpxTrack[][]>([])
+  const [redoStack, setRedoStack] = React.useState<GpxTrack[][]>([])
   const [workspaceReady, setWorkspaceReady] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const fileDragDepthRef = React.useRef(0)
   const persistenceDisabledRef = React.useRef(false)
+  const pointDragSnapshotRef = React.useRef<GpxTrack[] | null>(null)
+  const tracksRef = React.useRef<GpxTrack[]>([])
+  const undoStackRef = React.useRef<GpxTrack[][]>([])
+  const redoStackRef = React.useRef<GpxTrack[][]>([])
+  const routingRequestRef = React.useRef<AbortController | null>(null)
 
   const activeTrack =
     tracks.find((track) => track.id === activeTrackId) ?? tracks[0]
@@ -157,6 +229,10 @@ export function GpxEditor() {
   )
 
   React.useEffect(() => {
+    tracksRef.current = tracks
+  }, [tracks])
+
+  React.useEffect(() => {
     let cancelled = false
 
     loadWorkspace()
@@ -177,6 +253,7 @@ export function GpxEditor() {
           ? workspace.activeTrackId
           : (workspace.tracks[0]?.id ?? "")
 
+        tracksRef.current = workspace.tracks
         setTracks(workspace.tracks)
         setFolders(restoredFolders)
         setActiveTrackId(restoredActiveTrackId)
@@ -186,6 +263,7 @@ export function GpxEditor() {
         )
         setSearchOpen(workspace.searchOpen)
         setElevationOpen(workspace.elevationOpen)
+        setAutoRouting(workspace.autoRouting ?? true)
       })
       .catch((error) => {
         persistenceDisabledRef.current = true
@@ -219,6 +297,7 @@ export function GpxEditor() {
       sidebarWidth,
       searchOpen,
       elevationOpen,
+      autoRouting,
     }
 
     void saveWorkspace(workspace).catch((error) => {
@@ -228,6 +307,7 @@ export function GpxEditor() {
     })
   }, [
     activeTrackId,
+    autoRouting,
     elevationOpen,
     folders,
     searchOpen,
@@ -236,6 +316,13 @@ export function GpxEditor() {
     tracks,
     workspaceReady,
   ])
+
+  React.useEffect(
+    () => () => {
+      routingRequestRef.current?.abort()
+    },
+    []
+  )
 
   React.useEffect(() => {
     if (!notice) {
@@ -246,9 +333,462 @@ export function GpxEditor() {
     return () => window.clearTimeout(timeout)
   }, [notice])
 
-  function chooseTool(tool: EditorTool) {
-    setActiveTool(tool)
+  function commitTracks(nextTracks: GpxTrack[]) {
+    const nextUndoStack = [
+      ...undoStackRef.current.slice(-39),
+      cloneTracks(tracksRef.current),
+    ]
+    undoStackRef.current = nextUndoStack
+    redoStackRef.current = []
+    tracksRef.current = nextTracks
+    setUndoStack(nextUndoStack)
+    setRedoStack(redoStackRef.current)
+    setTracks(nextTracks)
   }
+
+  function undo() {
+    cancelPendingRouting()
+    const previous = undoStackRef.current.at(-1)
+    if (!previous) {
+      return
+    }
+
+    const nextTracks = cloneTracks(previous)
+    undoStackRef.current = undoStackRef.current.slice(0, -1)
+    redoStackRef.current = [
+      ...redoStackRef.current.slice(-39),
+      cloneTracks(tracksRef.current),
+    ]
+    tracksRef.current = nextTracks
+    setUndoStack(undoStackRef.current)
+    setRedoStack(redoStackRef.current)
+    setTracks(nextTracks)
+    setActiveTrackId((currentId) =>
+      previous.some((track) => track.id === currentId)
+        ? currentId
+        : (previous[0]?.id ?? "")
+    )
+    setNotice("Undid last edit")
+  }
+
+  function redo() {
+    cancelPendingRouting()
+    const next = redoStackRef.current.at(-1)
+    if (!next) {
+      return
+    }
+
+    const nextTracks = cloneTracks(next)
+    undoStackRef.current = [
+      ...undoStackRef.current.slice(-39),
+      cloneTracks(tracksRef.current),
+    ]
+    redoStackRef.current = redoStackRef.current.slice(0, -1)
+    tracksRef.current = nextTracks
+    setUndoStack(undoStackRef.current)
+    setRedoStack(redoStackRef.current)
+    setTracks(nextTracks)
+    setActiveTrackId((currentId) =>
+      next.some((track) => track.id === currentId)
+        ? currentId
+        : (next[0]?.id ?? "")
+    )
+    setNotice("Redid last edit")
+  }
+
+  function cancelPendingRouting() {
+    routingRequestRef.current?.abort()
+    routingRequestRef.current = null
+    setRoutingPending(false)
+  }
+
+  function changeAutoRouting(enabled: boolean) {
+    cancelPendingRouting()
+    setAutoRouting(enabled)
+    setNotice(null)
+  }
+
+  function createNewRoute() {
+    cancelPendingRouting()
+    const folder = "Routes"
+    const baseName = "New route"
+    let name = baseName
+    let suffix = 2
+
+    while (
+      tracks.some(
+        (track) =>
+          track.folder === folder &&
+          track.name.toLowerCase() === name.toLowerCase()
+      )
+    ) {
+      name = `${baseName} ${suffix}`
+      suffix += 1
+    }
+
+    const route: GpxTrack = {
+      id: `route-${crypto.randomUUID()}`,
+      name,
+      folder,
+      color: trackColors[tracks.length % trackColors.length],
+      visible: true,
+      coordinates: [],
+    }
+
+    commitTracks([...tracks, route])
+    setFolders((current) =>
+      current.includes(folder) ? current : [...current, folder]
+    )
+    setActiveTrackId(route.id)
+    setActiveTool("draw")
+    setElevationOpen(false)
+    setNotice(null)
+  }
+
+  function simplifyActiveTrack() {
+    if (!activeTrack || activeTrack.coordinates.length < 3) {
+      setNotice("This route does not have enough points to simplify")
+      return
+    }
+
+    const coordinates = simplifyTrackCoordinates(activeTrack.coordinates, 10)
+    if (coordinates.length === activeTrack.coordinates.length) {
+      setNotice("This route is already simple")
+      return
+    }
+
+    commitTracks(
+      tracks.map((track) =>
+        track.id === activeTrack.id ? { ...track, coordinates } : track
+      )
+    )
+    setNotice(
+      `Simplified ${activeTrack.name}: removed ${
+        activeTrack.coordinates.length - coordinates.length
+      } points`
+    )
+  }
+
+  function cleanActiveTrack() {
+    if (!activeTrack) {
+      return
+    }
+
+    const coordinates = cleanTrackCoordinates(activeTrack.coordinates)
+    if (coordinates.length === activeTrack.coordinates.length) {
+      setNotice("No duplicate or invalid points found")
+      return
+    }
+
+    commitTracks(
+      tracks.map((track) =>
+        track.id === activeTrack.id ? { ...track, coordinates } : track
+      )
+    )
+    setNotice(
+      `Cleaned ${activeTrack.name}: removed ${
+        activeTrack.coordinates.length - coordinates.length
+      } points`
+    )
+  }
+
+  function mergeVisibleTracks() {
+    if (!activeTrack) {
+      return
+    }
+
+    const mergeTracks = [
+      activeTrack,
+      ...tracks.filter(
+        (track) =>
+          track.id !== activeTrack.id &&
+          track.visible &&
+          track.coordinates.length > 0
+      ),
+    ]
+
+    if (mergeTracks.length < 2) {
+      setNotice("Show at least one other route to merge with this one")
+      return
+    }
+
+    const mergedTrackIds = new Set(mergeTracks.map((track) => track.id))
+    const mergedTrack: GpxTrack = {
+      ...activeTrack,
+      name: `${activeTrack.name} merged`,
+      coordinates: mergeCoordinates(mergeTracks),
+    }
+    const activeIndex = tracks.findIndex(
+      (track) => track.id === activeTrack.id
+    )
+    const nextTracks = tracks.filter((track) => !mergedTrackIds.has(track.id))
+    nextTracks.splice(Math.min(activeIndex, nextTracks.length), 0, mergedTrack)
+    commitTracks(nextTracks)
+    setNotice(`Merged ${mergeTracks.length} visible routes`)
+  }
+
+  function chooseTool(tool: EditorTool) {
+    if (tool !== "draw") {
+      cancelPendingRouting()
+    }
+
+    if (tool === "simplify") {
+      simplifyActiveTrack()
+      setActiveTool("select")
+      return
+    }
+    if (tool === "clean") {
+      cleanActiveTrack()
+      setActiveTool("select")
+      return
+    }
+    if (tool === "merge") {
+      mergeVisibleTracks()
+      setActiveTool("select")
+      return
+    }
+    if (tool === "draw" && !activeTrack) {
+      createNewRoute()
+      return
+    }
+    if (
+      (tool === "split" || tool === "crop") &&
+      (!activeTrack || activeTrack.coordinates.length < 3)
+    ) {
+      setNotice(`This route does not have enough points to ${tool}`)
+      return
+    }
+
+    setActiveTool(tool)
+    setNotice(null)
+  }
+
+  async function addRoutePoint(coordinate: TrackCoordinate) {
+    if (!activeTrack) {
+      return
+    }
+
+    const targetTrackId = activeTrack.id
+    const start = activeTrack.coordinates.at(-1)
+
+    if (!autoRouting || !start) {
+      const currentTracks = tracksRef.current
+      commitTracks(
+        currentTracks.map((track) =>
+          track.id === targetTrackId
+            ? {
+                ...track,
+                coordinates: [...track.coordinates, coordinate],
+              }
+            : track
+        )
+      )
+      return
+    }
+
+    if (routingRequestRef.current) {
+      setNotice("Wait for auto-routing to finish")
+      return
+    }
+
+    const controller = new AbortController()
+    routingRequestRef.current = controller
+    setRoutingPending(true)
+    setNotice(null)
+
+    try {
+      const routeCoordinates = await getAutoRoute(
+        start,
+        coordinate,
+        controller.signal
+      )
+      if (controller.signal.aborted) {
+        return
+      }
+
+      const currentTracks = tracksRef.current
+      const targetTrack = currentTracks.find(
+        (track) => track.id === targetTrackId
+      )
+      if (!targetTrack) {
+        return
+      }
+
+      commitTracks(
+        currentTracks.map((track) =>
+          track.id === targetTrackId
+            ? {
+                ...track,
+                coordinates: [
+                  ...track.coordinates.slice(0, -1),
+                  ...routeCoordinates,
+                ],
+              }
+            : track
+        )
+      )
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
+
+      setNotice(
+        error instanceof Error
+          ? `${error.message}. Turn Auto-routing off to draw directly.`
+          : "Auto-routing failed. Turn it off to draw directly."
+      )
+    } finally {
+      if (routingRequestRef.current === controller) {
+        routingRequestRef.current = null
+        setRoutingPending(false)
+      }
+    }
+  }
+
+  function beginPointMove() {
+    if (!pointDragSnapshotRef.current) {
+      pointDragSnapshotRef.current = cloneTracks(tracks)
+    }
+  }
+
+  function moveRoutePoint(
+    pointIndex: number,
+    coordinate: TrackCoordinate
+  ) {
+    if (!activeTrack) {
+      return
+    }
+
+    setTracks((current) => {
+      const nextTracks = current.map((track) => {
+        if (track.id !== activeTrack.id) {
+          return track
+        }
+
+        const coordinates = track.coordinates.slice()
+        coordinates[pointIndex] = coordinate
+        return { ...track, coordinates }
+      })
+      tracksRef.current = nextTracks
+      return nextTracks
+    })
+  }
+
+  function finishPointMove() {
+    const snapshot = pointDragSnapshotRef.current
+    if (!snapshot) {
+      return
+    }
+
+    undoStackRef.current = [...undoStackRef.current.slice(-39), snapshot]
+    redoStackRef.current = []
+    setUndoStack(undoStackRef.current)
+    setRedoStack(redoStackRef.current)
+    pointDragSnapshotRef.current = null
+  }
+
+  function splitActiveTrack(pointIndex: number) {
+    if (
+      !activeTrack ||
+      pointIndex <= 0 ||
+      pointIndex >= activeTrack.coordinates.length - 1
+    ) {
+      setNotice("Choose a point away from the start or finish")
+      return
+    }
+
+    const first: GpxTrack = {
+      ...activeTrack,
+      name: `${activeTrack.name} 1`,
+      coordinates: activeTrack.coordinates.slice(0, pointIndex + 1),
+    }
+    const second: GpxTrack = {
+      ...activeTrack,
+      id: `split-${crypto.randomUUID()}`,
+      name: `${activeTrack.name} 2`,
+      coordinates: activeTrack.coordinates.slice(pointIndex),
+    }
+    const trackIndex = tracks.findIndex(
+      (track) => track.id === activeTrack.id
+    )
+    const nextTracks = tracks.filter((track) => track.id !== activeTrack.id)
+    nextTracks.splice(trackIndex, 0, first, second)
+    commitTracks(nextTracks)
+    setActiveTrackId(second.id)
+    setActiveTool("select")
+    setNotice(`Split ${activeTrack.name} into two routes`)
+  }
+
+  function cropActiveTrack(startIndex: number, endIndex: number) {
+    if (!activeTrack) {
+      return
+    }
+
+    const firstIndex = Math.min(startIndex, endIndex)
+    const lastIndex = Math.max(startIndex, endIndex)
+    if (lastIndex - firstIndex < 1) {
+      setNotice("Choose two different points")
+      return
+    }
+
+    const coordinates = activeTrack.coordinates.slice(
+      firstIndex,
+      lastIndex + 1
+    )
+    commitTracks(
+      tracks.map((track) =>
+        track.id === activeTrack.id ? { ...track, coordinates } : track
+      )
+    )
+    setActiveTool("select")
+    setNotice(`Kept ${coordinates.length} points from ${activeTrack.name}`)
+  }
+
+  function finishDrawing() {
+    if (routingRequestRef.current) {
+      setNotice("Wait for auto-routing to finish")
+      return
+    }
+
+    if (!activeTrack || activeTrack.coordinates.length < 2) {
+      setNotice("Add at least two points to finish the route")
+      return
+    }
+
+    setActiveTool("select")
+    setNotice(`Finished ${activeTrack.name}`)
+  }
+
+  React.useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault()
+        if (event.shiftKey) {
+          redo()
+        } else {
+          undo()
+        }
+      } else if (event.key === "Escape" && activeTool !== "select") {
+        cancelPendingRouting()
+        setActiveTool("select")
+        setNotice("Editing cancelled")
+      } else if (event.key === "Enter" && activeTool === "draw") {
+        finishDrawing()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  })
 
   function closeSidebar() {
     setSidebarTransitioning(true)
@@ -258,6 +798,12 @@ export function GpxEditor() {
   function openSidebar() {
     setSidebarTransitioning(true)
     setSidebarOpen(true)
+  }
+
+  function selectTrack(trackId: string) {
+    cancelPendingRouting()
+    setActiveTrackId(trackId)
+    setActiveTool("select")
   }
 
   function toggleTrackVisibility(trackId: string) {
@@ -389,6 +935,7 @@ export function GpxEditor() {
         current.includes("Imported") ? current : [...current, "Imported"]
       )
       setActiveTrackId(importedTracks.at(-1)!.id)
+      setActiveTool("select")
     }
 
     const failedResult = results.find(
@@ -463,8 +1010,8 @@ export function GpxEditor() {
   }
 
   function exportActiveTrack() {
-    if (!activeTrack) {
-      setNotice("Import a track before exporting")
+    if (!activeTrack || activeTrack.coordinates.length < 2) {
+      setNotice("Add at least two points before exporting")
       return
     }
 
@@ -700,9 +1247,9 @@ export function GpxEditor() {
           onWidthChange={setSidebarWidth}
           onOpenSearch={() => setSearchOpen((current) => !current)}
           onQueryChange={setQuery}
-          onNewRoute={() => chooseTool("draw")}
+          onNewRoute={createNewRoute}
           onImport={() => fileInputRef.current?.click()}
-          onSelectTrack={setActiveTrackId}
+          onSelectTrack={selectTrack}
           onToggleTrack={toggleTrackVisibility}
           onChangeTrackColor={changeTrackColor}
           onRenameTrack={renameTrack}
@@ -725,6 +1272,16 @@ export function GpxEditor() {
           <MapCanvas
             tracks={tracks}
             activeTrackId={activeTrackId}
+            activeTool={activeTool}
+            onSelectTrack={selectTrack}
+            onAddPoint={addRoutePoint}
+            onMovePoint={moveRoutePoint}
+            onMovePointStart={beginPointMove}
+            onMovePointEnd={finishPointMove}
+            onSplit={splitActiveTrack}
+            onCrop={cropActiveTrack}
+            onFinishDrawing={finishDrawing}
+            onToolMessage={setNotice}
           />
 
           {fileDragActive && (
@@ -765,15 +1322,38 @@ export function GpxEditor() {
                   <FileUp />
                   Import GPX file
                 </Button>
+                <button
+                  type="button"
+                  className="mt-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  onClick={createNewRoute}
+                >
+                  Or draw a new route
+                </button>
               </div>
             </div>
           )}
 
-          {activeTrack && (
+          {(activeTrack ||
+            undoStack.length > 0 ||
+            redoStack.length > 0) && (
             <MapHeader
+              hasActiveTrack={Boolean(activeTrack)}
               activeTool={activeTool}
               onChooseTool={chooseTool}
+              canUndo={undoStack.length > 0}
+              canRedo={redoStack.length > 0}
+              onUndo={undo}
+              onRedo={redo}
               onExport={exportActiveTrack}
+            />
+          )}
+
+          {activeTrack && activeTool !== "select" && !notice && (
+            <ToolHint
+              tool={activeTool}
+              autoRouting={autoRouting}
+              routingPending={routingPending}
+              onAutoRoutingChange={changeAutoRouting}
             />
           )}
 
@@ -786,7 +1366,7 @@ export function GpxEditor() {
             </div>
           )}
 
-          {activeTrack && stats && (
+          {activeTrack && activeTrack.coordinates.length > 1 && stats && (
             <ElevationPanel
               track={activeTrack}
               stats={stats}
@@ -1657,12 +2237,22 @@ function TrackColorPicker({
 }
 
 function MapHeader({
+  hasActiveTrack,
   activeTool,
   onChooseTool,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onExport,
 }: {
+  hasActiveTrack: boolean
   activeTool: EditorTool
   onChooseTool: (tool: EditorTool) => void
+  canUndo: boolean
+  canRedo: boolean
+  onUndo: () => void
+  onRedo: () => void
   onExport: () => void
 }) {
   return (
@@ -1680,6 +2270,7 @@ function MapHeader({
                 <Button
                   aria-label={label}
                   aria-pressed={activeTool === id}
+                  disabled={!hasActiveTrack && id !== "draw"}
                   variant="ghost"
                   size="icon-sm"
                   className="rounded-lg text-muted-foreground hover:bg-white/[0.1] hover:text-foreground aria-pressed:bg-white/[0.1] aria-pressed:text-foreground dark:hover:bg-white/[0.1]"
@@ -1709,7 +2300,8 @@ function MapHeader({
               variant="ghost"
               size="icon-sm"
               className={pillControlButtonClass}
-              disabled
+              disabled={!canUndo}
+              onClick={onUndo}
             >
               <Undo2 />
             </Button>
@@ -1725,7 +2317,8 @@ function MapHeader({
               variant="ghost"
               size="icon-sm"
               className={pillControlButtonClass}
-              disabled
+              disabled={!canRedo}
+              onClick={onRedo}
             >
               <Redo2 />
             </Button>
@@ -1741,6 +2334,7 @@ function MapHeader({
               variant="ghost"
               size="icon-sm"
               className={pillControlButtonClass}
+              disabled={!hasActiveTrack}
               onClick={onExport}
             >
               <Download />
@@ -1760,6 +2354,79 @@ function MapHeader({
         </Button>
       </div>
     </header>
+  )
+}
+
+function ToolHint({
+  tool,
+  autoRouting,
+  routingPending,
+  onAutoRoutingChange,
+}: {
+  tool: EditorTool
+  autoRouting: boolean
+  routingPending: boolean
+  onAutoRoutingChange: (enabled: boolean) => void
+}) {
+  const messages: Partial<Record<EditorTool, string>> = {
+    split: "Click the route where you want to split it",
+    crop: "Click both ends of the section you want to keep",
+  }
+  const message = messages[tool]
+  if (tool !== "draw" && !message) {
+    return null
+  }
+
+  return (
+    <div
+      className={cn(
+        "pointer-events-auto absolute left-1/2 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-2 border border-white/[0.1] bg-[#101010] p-1.5 text-[11px] text-foreground/85 backdrop-blur-md",
+        tool === "draw"
+          ? "top-[52px] rounded-t-[4px] rounded-b-[10px] border-t-0 shadow-[0_16px_30px_rgba(0,0,0,0.32)]"
+          : "top-16 rounded-[10px] shadow-xl",
+        message && "pl-3"
+      )}
+    >
+      {message && <span className="whitespace-nowrap">{message}</span>}
+      {tool === "draw" && (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoRouting}
+          aria-label={`Turn auto-routing ${autoRouting ? "off" : "on"}`}
+          className="flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+          onClick={() => onAutoRoutingChange(!autoRouting)}
+        >
+          {routingPending && (
+            <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" />
+          )}
+          <span>Auto-routing</span>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "relative h-3.5 w-6 overflow-hidden rounded-full ring-1 ring-inset transition-colors duration-150",
+              autoRouting
+                ? "bg-[#f1f2f3] ring-white/90"
+                : "bg-[#30343a] ring-white/10"
+            )}
+          >
+            <span
+              className={cn(
+                "absolute top-1/2 left-0.5 size-2.5 -translate-y-1/2 rounded-full shadow-sm transition-[transform,background-color] duration-150",
+                autoRouting
+                  ? "translate-x-2.5 bg-[#3b3f45]"
+                  : "translate-x-0 bg-white/65"
+              )}
+            />
+          </span>
+        </button>
+      )}
+      {tool !== "draw" && (
+        <span className="whitespace-nowrap text-muted-foreground">
+          Esc to cancel
+        </span>
+      )}
+    </div>
   )
 }
 

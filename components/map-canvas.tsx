@@ -1,9 +1,13 @@
 "use client"
 
 import * as React from "react"
-import type { Map as MapLibreMap, StyleSpecification } from "maplibre-gl"
+import type {
+  Map as MapLibreMap,
+  MapMouseEvent,
+  StyleSpecification,
+} from "maplibre-gl"
 
-import type { GpxTrack } from "@/lib/gpx"
+import type { EditorTool, GpxTrack, TrackCoordinate } from "@/lib/gpx"
 
 const mapTilerKey = process.env.NEXT_PUBLIC_MAPTILER_KEY
 const mapTilerStyleUrl = mapTilerKey
@@ -39,6 +43,12 @@ const enhancedBasemapLineColors = {
   "Road network": "#484d52",
   "Road bridge": "#4a4f54",
 } as const
+
+function softenBasemapWater(map: MapLibreMap) {
+  if (map.getLayer("Water")) {
+    map.setPaintProperty("Water", "fill-color", "#1e1e1e")
+  }
+}
 
 function enhanceBasemapLineContrast(map: MapLibreMap) {
   for (const [layerId, color] of Object.entries(enhancedBasemapLineColors)) {
@@ -285,6 +295,16 @@ async function loadMapStyle(): Promise<StyleSpecification> {
 type MapCanvasProps = {
   tracks: GpxTrack[]
   activeTrackId: string
+  activeTool: EditorTool
+  onSelectTrack: (trackId: string) => void
+  onAddPoint: (coordinate: TrackCoordinate) => void
+  onMovePoint: (pointIndex: number, coordinate: TrackCoordinate) => void
+  onMovePointStart: () => void
+  onMovePointEnd: () => void
+  onSplit: (pointIndex: number) => void
+  onCrop: (startIndex: number, endIndex: number) => void
+  onFinishDrawing: () => void
+  onToolMessage: (message: string) => void
 }
 
 type ProjectedTrack = {
@@ -294,16 +314,62 @@ type ProjectedTrack = {
   path: string
   start: [number, number]
   end: [number, number]
+  points: { index: number; position: [number, number] }[]
+}
+
+function nearestTrackPointIndex(
+  map: MapLibreMap,
+  track: GpxTrack,
+  point: { x: number; y: number }
+) {
+  let nearestIndex = -1
+  let nearestDistance = Number.POSITIVE_INFINITY
+
+  track.coordinates.forEach(([longitude, latitude], index) => {
+    const projected = map.project([longitude, latitude])
+    const distance = Math.hypot(projected.x - point.x, projected.y - point.y)
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearestIndex = index
+    }
+  })
+
+  return { index: nearestIndex, distance: nearestDistance }
 }
 
 export function MapCanvas({
   tracks,
   activeTrackId,
+  activeTool,
+  onSelectTrack,
+  onAddPoint,
+  onMovePoint,
+  onMovePointStart,
+  onMovePointEnd,
+  onSplit,
+  onCrop,
+  onFinishDrawing,
+  onToolMessage,
 }: MapCanvasProps) {
   const containerRef = React.useRef<HTMLDivElement>(null)
   const mapRef = React.useRef<MapLibreMap | null>(null)
   const mapLibraryRef = React.useRef<typeof import("maplibre-gl") | null>(null)
+  const lastFittedTrackIdRef = React.useRef("")
   const [ready, setReady] = React.useState(false)
+  const interactionScope = `${activeTrackId}:${activeTool}`
+  const [cropAnchor, setCropAnchor] = React.useState<{
+    scope: string
+    index: number
+  } | null>(null)
+  const [drawPreview, setDrawPreview] = React.useState<{
+    scope: string
+    position: [number, number]
+  } | null>(null)
+  const cropAnchorIndex =
+    cropAnchor?.scope === interactionScope ? cropAnchor.index : null
+  const drawPreviewPosition =
+    drawPreview?.scope === interactionScope ? drawPreview.position : null
   const [projectedTracks, setProjectedTracks] = React.useState<
     ProjectedTrack[]
   >([])
@@ -353,6 +419,7 @@ export function MapCanvas({
 
       map.once("load", () => {
         if (!cancelled) {
+          softenBasemapWater(map)
           enhanceBasemapLineContrast(map)
           enhanceBuildingFootprintContrast(map)
           enhanceSettlementLabelContrast(map)
@@ -394,7 +461,7 @@ export function MapCanvas({
 
     setProjectedTracks(
       tracks
-        .filter((track) => track.visible && track.coordinates.length > 1)
+        .filter((track) => track.visible && track.coordinates.length > 0)
         .map((track) => {
           const points = track.coordinates.map(([longitude, latitude]) => {
             const point = map.project([longitude, latitude])
@@ -413,10 +480,22 @@ export function MapCanvas({
               .join(" "),
             start: points[0],
             end: points.at(-1)!,
+            points: points
+              .map((position, index) => ({ index, position }))
+              .filter(
+                ({ index }) =>
+                  index === 0 ||
+                  index === points.length - 1 ||
+                  (track.id === activeTrackId &&
+                    index === cropAnchorIndex) ||
+                  index %
+                    Math.max(1, Math.ceil(points.length / 400)) ===
+                    0
+              ),
           }
         })
     )
-  }, [activeTrackId, tracks])
+  }, [activeTrackId, cropAnchorIndex, tracks])
 
   React.useEffect(() => {
     const map = mapRef.current
@@ -437,13 +516,127 @@ export function MapCanvas({
 
   React.useEffect(() => {
     const map = mapRef.current
-    const maplibre = mapLibraryRef.current
     const activeTrack = tracks.find((track) => track.id === activeTrackId)
 
-    if (!map || !maplibre || !ready || !activeTrack?.coordinates.length) {
+    if (!map || !ready) {
       return
     }
 
+    const canvas = map.getCanvas()
+    const previousCursor = canvas.style.cursor
+    canvas.style.cursor =
+      activeTool === "draw"
+        ? "crosshair"
+        : activeTool === "split" || activeTool === "crop"
+          ? "cell"
+          : ""
+
+    if (activeTool === "draw") {
+      map.doubleClickZoom.disable()
+    }
+
+    function handleClick(event: MapMouseEvent) {
+      if (activeTool === "draw") {
+        if (event.originalEvent.detail > 1) {
+          return
+        }
+        const elevation = activeTrack?.coordinates.at(-1)?.[2] ?? 0
+        onAddPoint([event.lngLat.lng, event.lngLat.lat, elevation])
+        return
+      }
+
+      if (
+        (activeTool !== "split" && activeTool !== "crop") ||
+        !activeTrack
+      ) {
+        return
+      }
+
+      const nearest = nearestTrackPointIndex(map!, activeTrack, event.point)
+      if (nearest.index === -1 || nearest.distance > 36) {
+        onToolMessage("Click closer to the active route")
+        return
+      }
+
+      if (activeTool === "split") {
+        onSplit(nearest.index)
+        return
+      }
+
+      if (cropAnchorIndex === null) {
+        setCropAnchor({ scope: interactionScope, index: nearest.index })
+        onToolMessage("Now click the other end of the section to keep")
+      } else {
+        onCrop(cropAnchorIndex, nearest.index)
+        setCropAnchor(null)
+      }
+    }
+
+    function handleMouseMove(event: MapMouseEvent) {
+      if (activeTool === "draw") {
+        setDrawPreview({
+          scope: interactionScope,
+          position: [event.point.x, event.point.y],
+        })
+      }
+    }
+
+    function handleMouseLeave() {
+      setDrawPreview(null)
+    }
+
+    function handleDoubleClick(event: MapMouseEvent) {
+      if (activeTool === "draw") {
+        event.preventDefault()
+        onFinishDrawing()
+      }
+    }
+
+    map.on("click", handleClick)
+    map.on("mousemove", handleMouseMove)
+    map.on("mouseout", handleMouseLeave)
+    map.on("dblclick", handleDoubleClick)
+
+    return () => {
+      canvas.style.cursor = previousCursor
+      map.off("click", handleClick)
+      map.off("mousemove", handleMouseMove)
+      map.off("mouseout", handleMouseLeave)
+      map.off("dblclick", handleDoubleClick)
+      if (activeTool === "draw") {
+        map.doubleClickZoom.enable()
+      }
+    }
+  }, [
+    activeTool,
+    activeTrackId,
+    cropAnchorIndex,
+    interactionScope,
+    onAddPoint,
+    onCrop,
+    onFinishDrawing,
+    onSplit,
+    onToolMessage,
+    ready,
+    tracks,
+  ])
+
+  React.useEffect(() => {
+    const map = mapRef.current
+    const maplibre = mapLibraryRef.current
+    const activeTrack = tracks.find((track) => track.id === activeTrackId)
+
+    if (
+      !map ||
+      !maplibre ||
+      !ready ||
+      !activeTrack?.coordinates.length ||
+      lastFittedTrackIdRef.current === activeTrack.id
+    ) {
+      return
+    }
+
+    lastFittedTrackIdRef.current = activeTrack.id
     const animationFrame = window.requestAnimationFrame(() => {
       if (
         !containerRef.current ||
@@ -468,6 +661,48 @@ export function MapCanvas({
     return () => window.cancelAnimationFrame(animationFrame)
   }, [activeTrackId, ready, tracks])
 
+  function beginPointDrag(
+    event: React.PointerEvent<SVGCircleElement>
+  ) {
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    mapRef.current?.dragPan.disable()
+    onMovePointStart()
+  }
+
+  function movePoint(
+    event: React.PointerEvent<SVGCircleElement>,
+    pointIndex: number
+  ) {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+      return
+    }
+
+    const map = mapRef.current
+    const container = containerRef.current
+    const activeTrack = tracks.find((track) => track.id === activeTrackId)
+    const elevation = activeTrack?.coordinates[pointIndex]?.[2] ?? 0
+    if (!map || !container) {
+      return
+    }
+
+    const bounds = container.getBoundingClientRect()
+    const coordinate = map.unproject([
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+    ])
+    onMovePoint(pointIndex, [coordinate.lng, coordinate.lat, elevation])
+  }
+
+  function finishPointDrag(event: React.PointerEvent<SVGCircleElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    mapRef.current?.dragPan.enable()
+    onMovePointEnd()
+  }
+
   return (
     <div className="absolute inset-0 bg-[#202326]">
       <div
@@ -491,6 +726,11 @@ export function MapCanvas({
               strokeOpacity="0.56"
               strokeLinecap="round"
               strokeLinejoin="round"
+              style={{
+                pointerEvents: activeTool === "select" ? "stroke" : "none",
+                cursor: activeTool === "select" ? "pointer" : undefined,
+              }}
+              onClick={() => onSelectTrack(track.id)}
             />
           ))}
         {projectedTracks
@@ -505,6 +745,9 @@ export function MapCanvas({
                 strokeOpacity="0.65"
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                style={{
+                  pointerEvents: activeTool === "select" ? "stroke" : "none",
+                }}
               />
               <path
                 d={track.path}
@@ -530,8 +773,55 @@ export function MapCanvas({
                 stroke="#121418"
                 strokeWidth="2"
               />
+              {activeTool === "select" &&
+                track.points.map(({ index, position }) => (
+                  <circle
+                    key={index}
+                    cx={position[0]}
+                    cy={position[1]}
+                    r="4"
+                    fill="#181b20"
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    className="pointer-events-auto cursor-grab drop-shadow-md active:cursor-grabbing"
+                    onPointerDown={beginPointDrag}
+                    onPointerMove={(event) => movePoint(event, index)}
+                    onPointerUp={finishPointDrag}
+                    onPointerCancel={finishPointDrag}
+                  />
+                ))}
+              {activeTool === "crop" &&
+                cropAnchorIndex !== null &&
+                track.points
+                  .filter(({ index }) => index === cropAnchorIndex)
+                  .map(({ index, position }) => (
+                    <circle
+                      key={`crop-${index}`}
+                      cx={position[0]}
+                      cy={position[1]}
+                      r="8"
+                      fill={track.color}
+                      stroke="#ffffff"
+                      strokeWidth="2"
+                    />
+                  ))}
             </g>
           ))}
+        {activeTool === "draw" &&
+          drawPreviewPosition &&
+          projectedTracks
+            .filter((track) => track.active)
+            .map((track) => (
+              <path
+                key={`preview-${track.id}`}
+                d={`M ${track.end[0]} ${track.end[1]} L ${drawPreviewPosition[0]} ${drawPreviewPosition[1]}`}
+                fill="none"
+                stroke={track.color}
+                strokeWidth="3"
+                strokeDasharray="5 5"
+                strokeOpacity="0.8"
+              />
+            ))}
       </svg>
     </div>
   )

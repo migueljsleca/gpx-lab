@@ -189,7 +189,7 @@ svg.lucide {
   padding: 4px;
   border: 1px solid rgb(255 255 255 / 8%) !important;
   border-radius: 8px !important;
-  background: rgb(24 27 32 / 94%) !important;
+  background: rgb(16 16 16) !important;
   box-shadow: 0 25px 50px -12px rgb(0 0 0 / 25%) !important;
   backdrop-filter: blur(12px);
 }

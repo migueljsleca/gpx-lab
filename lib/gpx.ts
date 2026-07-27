@@ -4,6 +4,15 @@ export type TrackCoordinate = [
   elevation: number,
 ]
 
+export type EditorTool =
+  | "select"
+  | "draw"
+  | "split"
+  | "crop"
+  | "simplify"
+  | "clean"
+  | "merge"
+
 export type GpxTrack = {
   id: string
   name: string
@@ -52,6 +61,94 @@ function distanceBetween(a: TrackCoordinate, b: TrackCoordinate) {
     2 *
     Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
   )
+}
+
+function distanceToSegmentMeters(
+  point: TrackCoordinate,
+  start: TrackCoordinate,
+  end: TrackCoordinate
+) {
+  const latitudeScale = 111_320
+  const longitudeScale =
+    Math.cos(toRadians((start[1] + end[1]) / 2)) * latitudeScale
+  const pointX = (point[0] - start[0]) * longitudeScale
+  const pointY = (point[1] - start[1]) * latitudeScale
+  const endX = (end[0] - start[0]) * longitudeScale
+  const endY = (end[1] - start[1]) * latitudeScale
+  const segmentLengthSquared = endX * endX + endY * endY
+
+  if (segmentLengthSquared === 0) {
+    return Math.hypot(pointX, pointY)
+  }
+
+  const progress = Math.max(
+    0,
+    Math.min(1, (pointX * endX + pointY * endY) / segmentLengthSquared)
+  )
+
+  return Math.hypot(pointX - progress * endX, pointY - progress * endY)
+}
+
+export function simplifyTrackCoordinates(
+  coordinates: TrackCoordinate[],
+  toleranceMeters = 10
+) {
+  if (coordinates.length <= 2) {
+    return coordinates.slice()
+  }
+
+  const keep = new Uint8Array(coordinates.length)
+  keep[0] = 1
+  keep[coordinates.length - 1] = 1
+  const ranges: [number, number][] = [[0, coordinates.length - 1]]
+
+  while (ranges.length > 0) {
+    const [startIndex, endIndex] = ranges.pop()!
+    let furthestIndex = -1
+    let furthestDistance = toleranceMeters
+
+    for (let index = startIndex + 1; index < endIndex; index += 1) {
+      const distance = distanceToSegmentMeters(
+        coordinates[index],
+        coordinates[startIndex],
+        coordinates[endIndex]
+      )
+
+      if (distance > furthestDistance) {
+        furthestDistance = distance
+        furthestIndex = index
+      }
+    }
+
+    if (furthestIndex !== -1) {
+      keep[furthestIndex] = 1
+      ranges.push([startIndex, furthestIndex], [furthestIndex, endIndex])
+    }
+  }
+
+  return coordinates.filter((_, index) => keep[index] === 1)
+}
+
+export function cleanTrackCoordinates(coordinates: TrackCoordinate[]) {
+  return coordinates.reduce<TrackCoordinate[]>((cleaned, coordinate) => {
+    if (
+      !coordinate.every(Number.isFinite) ||
+      coordinate[0] < -180 ||
+      coordinate[0] > 180 ||
+      coordinate[1] < -90 ||
+      coordinate[1] > 90
+    ) {
+      return cleaned
+    }
+
+    const previous = cleaned.at(-1)
+    if (previous && distanceBetween(previous, coordinate) < 0.0005) {
+      return cleaned
+    }
+
+    cleaned.push(coordinate)
+    return cleaned
+  }, [])
 }
 
 export function calculateTrackStats(track: GpxTrack): TrackStats {
