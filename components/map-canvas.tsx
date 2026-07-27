@@ -43,6 +43,7 @@ const enhancedBasemapLineColors = {
   "Road network": "#484d52",
   "Road bridge": "#4a4f54",
 } as const
+const trackSelectionWidth = 20
 
 function softenBasemapWater(map: MapLibreMap) {
   if (map.getLayer("Water")) {
@@ -60,16 +61,28 @@ function enhanceBasemapLineContrast(map: MapLibreMap) {
   if (map.getLayer("Pathway outline")) {
     map.setLayerZoomRange("Pathway outline", 10, 24)
     map.setPaintProperty("Pathway outline", "line-color", "#181b1e")
-    map.setPaintProperty(
-      "Pathway outline",
-      "line-opacity",
-      ["interpolate", ["linear"], ["zoom"], 10, 0.7, 18, 0.85]
-    )
-    map.setPaintProperty(
-      "Pathway outline",
-      "line-width",
-      ["interpolate", ["linear"], ["zoom"], 10, 1.6, 14, 2, 18, 3.2, 22, 5]
-    )
+    map.setPaintProperty("Pathway outline", "line-opacity", [
+      "interpolate",
+      ["linear"],
+      ["zoom"],
+      10,
+      0.7,
+      18,
+      0.85,
+    ])
+    map.setPaintProperty("Pathway outline", "line-width", [
+      "interpolate",
+      ["linear"],
+      ["zoom"],
+      10,
+      1.6,
+      14,
+      2,
+      18,
+      3.2,
+      22,
+      5,
+    ])
   }
 
   if (map.getLayer("Pathway")) {
@@ -85,23 +98,19 @@ function enhanceBasemapLineContrast(map: MapLibreMap) {
     ])
     map.setPaintProperty("Pathway", "line-dasharray", [1, 1.35])
     map.setPaintProperty("Pathway", "line-opacity", 0.95)
-    map.setPaintProperty(
-      "Pathway",
-      "line-width",
-      [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        10,
-        0.8,
-        14,
-        1.1,
-        18,
-        1.6,
-        22,
-        2.6,
-      ]
-    )
+    map.setPaintProperty("Pathway", "line-width", [
+      "interpolate",
+      ["linear"],
+      ["zoom"],
+      10,
+      0.8,
+      14,
+      1.1,
+      18,
+      1.6,
+      22,
+      2.6,
+    ])
   }
 
   if (map.getLayer("Tunnel pathway")) {
@@ -203,15 +212,7 @@ function addMountainPeakLabels(map: MapLibreMap) {
       ],
       layout: {
         "icon-image": "triangle",
-        "icon-size": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          9,
-          0.7,
-          14,
-          0.92,
-        ],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.7, 14, 0.92],
         "symbol-avoid-edges": true,
         "symbol-sort-key": ["to-number", ["get", "rank"]],
         "text-anchor": "top",
@@ -486,11 +487,8 @@ export function MapCanvas({
                 ({ index }) =>
                   index === 0 ||
                   index === points.length - 1 ||
-                  (track.id === activeTrackId &&
-                    index === cropAnchorIndex) ||
-                  index %
-                    Math.max(1, Math.ceil(points.length / 400)) ===
-                    0
+                  (track.id === activeTrackId && index === cropAnchorIndex) ||
+                  index % Math.max(1, Math.ceil(points.length / 400)) === 0
               ),
           }
         })
@@ -545,10 +543,7 @@ export function MapCanvas({
         return
       }
 
-      if (
-        (activeTool !== "split" && activeTool !== "crop") ||
-        !activeTrack
-      ) {
+      if ((activeTool !== "split" && activeTool !== "crop") || !activeTrack) {
         return
       }
 
@@ -661,9 +656,7 @@ export function MapCanvas({
     return () => window.cancelAnimationFrame(animationFrame)
   }, [activeTrackId, ready, tracks])
 
-  function beginPointDrag(
-    event: React.PointerEvent<SVGCircleElement>
-  ) {
+  function beginPointDrag(event: React.PointerEvent<SVGCircleElement>) {
     event.preventDefault()
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -717,21 +710,30 @@ export function MapCanvas({
         {projectedTracks
           .filter((track) => !track.active)
           .map((track) => (
-            <path
-              key={track.id}
-              d={track.path}
-              fill="none"
-              stroke={track.color}
-              strokeWidth="2"
-              strokeOpacity="0.56"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              style={{
-                pointerEvents: activeTool === "select" ? "stroke" : "none",
-                cursor: activeTool === "select" ? "pointer" : undefined,
-              }}
-              onClick={() => onSelectTrack(track.id)}
-            />
+            <g key={track.id}>
+              <path
+                d={track.path}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={trackSelectionWidth}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{
+                  pointerEvents: activeTool === "select" ? "stroke" : "none",
+                  cursor: activeTool === "select" ? "pointer" : undefined,
+                }}
+                onClick={() => onSelectTrack(track.id)}
+              />
+              <path
+                d={track.path}
+                fill="none"
+                stroke={track.color}
+                strokeWidth="2"
+                strokeOpacity="0.56"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </g>
           ))}
         {projectedTracks
           .filter((track) => track.active)
@@ -740,14 +742,24 @@ export function MapCanvas({
               <path
                 d={track.path}
                 fill="none"
+                stroke="transparent"
+                strokeWidth={trackSelectionWidth}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{
+                  pointerEvents: activeTool === "select" ? "stroke" : "none",
+                  cursor: activeTool === "select" ? "pointer" : undefined,
+                }}
+                onClick={() => onSelectTrack(track.id)}
+              />
+              <path
+                d={track.path}
+                fill="none"
                 stroke="white"
                 strokeWidth="8"
                 strokeOpacity="0.65"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                style={{
-                  pointerEvents: activeTool === "select" ? "stroke" : "none",
-                }}
               />
               <path
                 d={track.path}

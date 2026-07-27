@@ -14,7 +14,6 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  LoaderCircle,
   MousePointer2,
   MoreHorizontal,
   PanelLeftClose,
@@ -25,7 +24,6 @@ import {
   Route,
   Ruler,
   Scissors,
-  Search,
   Settings,
   SlidersHorizontal,
   Sparkles,
@@ -103,9 +101,7 @@ function BrandLogo() {
       <span className="text-[19px] font-black tracking-[-0.07em] italic">
         GPX
       </span>
-      <span className="text-[16px] font-semibold tracking-[-0.04em]">
-        Lab
-      </span>
+      <span className="text-[16px] font-semibold tracking-[-0.04em]">Lab</span>
     </div>
   )
 }
@@ -182,11 +178,8 @@ export function GpxEditor() {
   const [sidebarOpen, setSidebarOpen] = React.useState(true)
   const [sidebarTransitioning, setSidebarTransitioning] = React.useState(false)
   const [sidebarWidth, setSidebarWidth] = React.useState(sidebarMinWidth)
-  const [searchOpen, setSearchOpen] = React.useState(false)
-  const [query, setQuery] = React.useState("")
   const [elevationOpen, setElevationOpen] = React.useState(false)
   const [autoRouting, setAutoRouting] = React.useState(true)
-  const [routingPending, setRoutingPending] = React.useState(false)
   const [fileDragActive, setFileDragActive] = React.useState(false)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [undoStack, setUndoStack] = React.useState<GpxTrack[][]>([])
@@ -209,23 +202,11 @@ export function GpxEditor() {
   )
   const groupedTracks = React.useMemo(
     () =>
-      folders.flatMap((folder) => {
-        const normalizedQuery = query.trim().toLowerCase()
-        const folderMatches = folder.toLowerCase().includes(normalizedQuery)
-        const folderTracks = tracks.filter(
-          (track) =>
-            track.folder === folder &&
-            (folderMatches ||
-              track.name.toLowerCase().includes(normalizedQuery))
-        )
-
-        if (normalizedQuery && !folderMatches && folderTracks.length === 0) {
-          return []
-        }
-
-        return [{ name: folder, tracks: folderTracks }]
-      }),
-    [folders, query, tracks]
+      folders.map((folder) => ({
+        name: folder,
+        tracks: tracks.filter((track) => track.folder === folder),
+      })),
+    [folders, tracks]
   )
 
   React.useEffect(() => {
@@ -241,27 +222,34 @@ export function GpxEditor() {
           return
         }
 
+        const restoredTracks = workspace.tracks.map((track) =>
+          track.folder
+            ? track
+            : {
+                ...track,
+                folder: track.id.startsWith("import-") ? "Imported" : "Routes",
+              }
+        )
         const restoredFolders = Array.from(
           new Set([
-            ...workspace.folders,
-            ...workspace.tracks.map((track) => track.folder),
+            ...workspace.folders.filter(Boolean),
+            ...restoredTracks.map((track) => track.folder),
           ])
         )
-        const restoredActiveTrackId = workspace.tracks.some(
+        const restoredActiveTrackId = restoredTracks.some(
           (track) => track.id === workspace.activeTrackId
         )
           ? workspace.activeTrackId
-          : (workspace.tracks[0]?.id ?? "")
+          : (restoredTracks[0]?.id ?? "")
 
-        tracksRef.current = workspace.tracks
-        setTracks(workspace.tracks)
+        tracksRef.current = restoredTracks
+        setTracks(restoredTracks)
         setFolders(restoredFolders)
         setActiveTrackId(restoredActiveTrackId)
         setSidebarOpen(workspace.sidebarOpen)
         setSidebarWidth(
           clampSidebarWidth(workspace.sidebarWidth ?? sidebarMinWidth)
         )
-        setSearchOpen(workspace.searchOpen)
         setElevationOpen(workspace.elevationOpen)
         setAutoRouting(workspace.autoRouting ?? true)
       })
@@ -295,7 +283,6 @@ export function GpxEditor() {
       activeTrackId,
       sidebarOpen,
       sidebarWidth,
-      searchOpen,
       elevationOpen,
       autoRouting,
     }
@@ -310,7 +297,6 @@ export function GpxEditor() {
     autoRouting,
     elevationOpen,
     folders,
-    searchOpen,
     sidebarOpen,
     sidebarWidth,
     tracks,
@@ -399,7 +385,6 @@ export function GpxEditor() {
   function cancelPendingRouting() {
     routingRequestRef.current?.abort()
     routingRequestRef.current = null
-    setRoutingPending(false)
   }
 
   function changeAutoRouting(enabled: boolean) {
@@ -518,9 +503,7 @@ export function GpxEditor() {
       name: `${activeTrack.name} merged`,
       coordinates: mergeCoordinates(mergeTracks),
     }
-    const activeIndex = tracks.findIndex(
-      (track) => track.id === activeTrack.id
-    )
+    const activeIndex = tracks.findIndex((track) => track.id === activeTrack.id)
     const nextTracks = tracks.filter((track) => !mergedTrackIds.has(track.id))
     nextTracks.splice(Math.min(activeIndex, nextTracks.length), 0, mergedTrack)
     commitTracks(nextTracks)
@@ -593,7 +576,6 @@ export function GpxEditor() {
 
     const controller = new AbortController()
     routingRequestRef.current = controller
-    setRoutingPending(true)
     setNotice(null)
 
     try {
@@ -640,7 +622,6 @@ export function GpxEditor() {
     } finally {
       if (routingRequestRef.current === controller) {
         routingRequestRef.current = null
-        setRoutingPending(false)
       }
     }
   }
@@ -651,10 +632,7 @@ export function GpxEditor() {
     }
   }
 
-  function moveRoutePoint(
-    pointIndex: number,
-    coordinate: TrackCoordinate
-  ) {
+  function moveRoutePoint(pointIndex: number, coordinate: TrackCoordinate) {
     if (!activeTrack) {
       return
     }
@@ -708,9 +686,7 @@ export function GpxEditor() {
       name: `${activeTrack.name} 2`,
       coordinates: activeTrack.coordinates.slice(pointIndex),
     }
-    const trackIndex = tracks.findIndex(
-      (track) => track.id === activeTrack.id
-    )
+    const trackIndex = tracks.findIndex((track) => track.id === activeTrack.id)
     const nextTracks = tracks.filter((track) => track.id !== activeTrack.id)
     nextTracks.splice(trackIndex, 0, first, second)
     commitTracks(nextTracks)
@@ -731,10 +707,7 @@ export function GpxEditor() {
       return
     }
 
-    const coordinates = activeTrack.coordinates.slice(
-      firstIndex,
-      lastIndex + 1
-    )
+    const coordinates = activeTrack.coordinates.slice(firstIndex, lastIndex + 1)
     commitTracks(
       tracks.map((track) =>
         track.id === activeTrack.id ? { ...track, coordinates } : track
@@ -1207,7 +1180,7 @@ export function GpxEditor() {
             aria-hidden="true"
             className={cn(
               floatingControlFrameClass,
-              "pointer-events-none absolute -inset-px transition-[opacity,transform] transform-gpu",
+              "pointer-events-none absolute -inset-px transform-gpu transition-[opacity,transform]",
               collapsedControlReady
                 ? "scale-100 opacity-100 delay-50 duration-150 ease-[cubic-bezier(0.23,1,0.32,1)]"
                 : "scale-[0.985] opacity-0 delay-0 duration-75 ease-out"
@@ -1238,15 +1211,11 @@ export function GpxEditor() {
         <Sidebar
           open={sidebarOpen}
           width={sidebarWidth}
-          query={query}
-          searchOpen={searchOpen}
           tracks={tracks}
           groupedTracks={groupedTracks}
           activeTrackId={activeTrackId}
           onLayoutTransitionEnd={() => setSidebarTransitioning(false)}
           onWidthChange={setSidebarWidth}
-          onOpenSearch={() => setSearchOpen((current) => !current)}
-          onQueryChange={setQuery}
           onNewRoute={createNewRoute}
           onImport={() => fileInputRef.current?.click()}
           onSelectTrack={selectTrack}
@@ -1307,9 +1276,7 @@ export function GpxEditor() {
                 <span className="grid size-10 place-items-center rounded-xl border border-white/[0.08] bg-white/[0.05] text-muted-foreground">
                   <Route className="size-4" />
                 </span>
-                <h1 className="mt-4 text-sm font-semibold">
-                  No GPX files yet
-                </h1>
+                <h1 className="mt-4 text-sm font-semibold">No GPX files yet</h1>
                 <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                   Import your first GPX file to view and edit it on the map.
                 </p>
@@ -1333,9 +1300,7 @@ export function GpxEditor() {
             </div>
           )}
 
-          {(activeTrack ||
-            undoStack.length > 0 ||
-            redoStack.length > 0) && (
+          {(activeTrack || undoStack.length > 0 || redoStack.length > 0) && (
             <MapHeader
               hasActiveTrack={Boolean(activeTrack)}
               activeTool={activeTool}
@@ -1352,7 +1317,6 @@ export function GpxEditor() {
             <ToolHint
               tool={activeTool}
               autoRouting={autoRouting}
-              routingPending={routingPending}
               onAutoRoutingChange={changeAutoRouting}
             />
           )}
@@ -1383,15 +1347,11 @@ export function GpxEditor() {
 type SidebarProps = {
   open: boolean
   width: number
-  searchOpen: boolean
-  query: string
   tracks: GpxTrack[]
   groupedTracks: { name: string; tracks: GpxTrack[] }[]
   activeTrackId: string
   onLayoutTransitionEnd: () => void
   onWidthChange: (width: number) => void
-  onOpenSearch: () => void
-  onQueryChange: (query: string) => void
   onNewRoute: () => void
   onImport: () => void
   onSelectTrack: (trackId: string) => void
@@ -1414,15 +1374,11 @@ type SidebarProps = {
 function Sidebar({
   open,
   width,
-  searchOpen,
-  query,
   tracks,
   groupedTracks,
   activeTrackId,
   onLayoutTransitionEnd,
   onWidthChange,
-  onOpenSearch,
-  onQueryChange,
   onNewRoute,
   onImport,
   onSelectTrack,
@@ -1550,36 +1506,6 @@ function Sidebar({
     >
       <div className="flex h-full flex-col px-3 py-5" style={{ width }}>
         <nav aria-label="Main actions" className="mt-11 space-y-1">
-          <SidebarAction
-            icon={Search}
-            label="Search"
-            active={searchOpen}
-            onClick={onOpenSearch}
-          />
-          {searchOpen && (
-            <div className="px-1 pb-1">
-              <label className="relative block">
-                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(event) => onQueryChange(event.target.value)}
-                  placeholder="Find a track"
-                  className="h-8 w-full rounded-lg border border-input bg-black/20 pr-8 pl-8 text-xs transition outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
-                />
-                {query && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    onClick={() => onQueryChange("")}
-                  >
-                    <X className="size-3.5" />
-                  </button>
-                )}
-              </label>
-            </div>
-          )}
           <SidebarAction icon={Plus} label="New route" onClick={onNewRoute} />
           <SidebarAction icon={FileUp} label="Import GPX" onClick={onImport} />
         </nav>
@@ -1688,7 +1614,7 @@ function Sidebar({
         aria-valuenow={Math.round(width)}
         tabIndex={0}
         className={cn(
-          "absolute inset-y-0 right-0 z-50 w-1.5 touch-none cursor-col-resize outline-none focus-visible:bg-white/[0.08]",
+          "absolute inset-y-0 right-0 z-50 w-1.5 cursor-col-resize touch-none outline-none focus-visible:bg-white/[0.08]",
           resizing && "bg-white/[0.06]"
         )}
         onDoubleClick={() => onWidthChange(sidebarMinWidth)}
@@ -1770,6 +1696,7 @@ function TrackFolder({
   const [renaming, setRenaming] = React.useState(false)
   const [draftName, setDraftName] = React.useState(name)
   const renameInputRef = React.useRef<HTMLInputElement>(null)
+  const renameAfterMenuCloseRef = React.useRef(false)
 
   React.useEffect(() => {
     if (!renaming) {
@@ -1819,7 +1746,11 @@ function TrackFolder({
                 commitRename()
               }}
             >
-              <Folder className="size-4 shrink-0" />
+              {open ? (
+                <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <Folder className="size-4 shrink-0 text-muted-foreground" />
+              )}
               <input
                 ref={renameInputRef}
                 value={draftName}
@@ -1858,16 +1789,20 @@ function TrackFolder({
             className="z-50 min-w-48 overflow-hidden rounded-lg border border-white/[0.1] bg-[#181b20]/98 p-1 text-xs text-muted-foreground shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-xl outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
             collisionPadding={8}
             onCloseAutoFocus={(event) => {
-              if (renameInputRef.current) {
-                event.preventDefault()
+              if (!renameAfterMenuCloseRef.current) {
+                return
               }
+
+              event.preventDefault()
+              renameAfterMenuCloseRef.current = false
+              setDraftName(name)
+              setRenaming(true)
             }}
           >
             <ContextMenu.Item
               className={trackContextItemClass}
               onSelect={() => {
-                setDraftName(name)
-                setRenaming(true)
+                renameAfterMenuCloseRef.current = true
               }}
             >
               <PencilLine className="size-3.5" />
@@ -1894,9 +1829,7 @@ function TrackFolder({
       <div
         className={cn(
           "grid transition-[grid-template-rows] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-          open
-            ? "grid-rows-[1fr] duration-200"
-            : "grid-rows-[0fr] duration-150"
+          open ? "grid-rows-[1fr] duration-200" : "grid-rows-[0fr] duration-150"
         )}
       >
         <div
@@ -2107,7 +2040,7 @@ function TrackRow({
             type="button"
             aria-label={`${track.visible ? "Hide" : "Show"} ${track.name}`}
             className={cn(
-              "grid size-7 shrink-0 place-items-center rounded-md opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none",
+              "grid size-7 shrink-0 place-items-center rounded-md opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none",
               track.visible
                 ? "text-muted-foreground hover:text-foreground"
                 : "text-inherit"
@@ -2187,10 +2120,7 @@ function TrackColorPicker({
           title="Change track color"
           className="grid h-7 w-3.5 shrink-0 place-items-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-white/25"
         >
-          <Route
-            className="size-4"
-            style={muted ? undefined : { color }}
-          />
+          <Route className="size-4" style={muted ? undefined : { color }} />
         </button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -2215,7 +2145,7 @@ function TrackColorPicker({
                   aria-pressed={selected}
                   title={trackColorLabels[trackColor]}
                   className={cn(
-                    "grid size-5 place-items-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
+                    "grid size-5 place-items-center rounded-full transition-transform outline-none hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
                     selected &&
                       "ring-2 ring-white/90 ring-offset-1 ring-offset-[#181b20]"
                   )}
@@ -2360,12 +2290,10 @@ function MapHeader({
 function ToolHint({
   tool,
   autoRouting,
-  routingPending,
   onAutoRoutingChange,
 }: {
   tool: EditorTool
   autoRouting: boolean
-  routingPending: boolean
   onAutoRoutingChange: (enabled: boolean) => void
 }) {
   const messages: Partial<Record<EditorTool, string>> = {
@@ -2394,17 +2322,14 @@ function ToolHint({
           role="switch"
           aria-checked={autoRouting}
           aria-label={`Turn auto-routing ${autoRouting ? "off" : "on"}`}
-          className="flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+          className="flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-foreground focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:outline-none"
           onClick={() => onAutoRoutingChange(!autoRouting)}
         >
-          {routingPending && (
-            <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" />
-          )}
           <span>Auto-routing</span>
           <span
             aria-hidden="true"
             className={cn(
-              "relative h-3.5 w-6 overflow-hidden rounded-full ring-1 ring-inset transition-colors duration-150",
+              "relative h-3.5 w-6 overflow-hidden rounded-full ring-1 transition-colors duration-150 ring-inset",
               autoRouting
                 ? "bg-[#f1f2f3] ring-white/90"
                 : "bg-[#30343a] ring-white/10"
@@ -2453,10 +2378,7 @@ function ElevationPanel({
       >
         <span className="flex h-8 min-w-0 items-center gap-3 rounded-[6px] px-2">
           <span className="flex min-w-0 items-center gap-2">
-            <Route
-              className="size-4 shrink-0"
-              style={{ color: track.color }}
-            />
+            <Route className="size-4 shrink-0" style={{ color: track.color }} />
             <span className="max-w-[180px] truncate font-medium">
               {track.folder} / {track.name}
             </span>
@@ -2486,20 +2408,14 @@ function ElevationPanel({
     <section className="absolute bottom-4 left-1/2 z-20 h-[236px] w-[min(920px,calc(100%-32px))] -translate-x-1/2 animate-in overflow-hidden rounded-xl border border-[#3a4149] bg-[#101316]/98 shadow-[0_24px_80px_rgba(0,0,0,0.58)] backdrop-blur-md duration-300 fade-in slide-in-from-bottom-3">
       <header className="flex h-11 items-center justify-between pr-3 pl-4">
         <div className="flex min-w-0 items-center gap-2">
-          <Route
-            className="size-4 shrink-0"
-            style={{ color: track.color }}
-          />
+          <Route className="size-4 shrink-0" style={{ color: track.color }} />
           <span className="truncate text-xs font-medium">
             {track.folder} / {track.name}
           </span>
         </div>
         <div className="ml-4 flex shrink-0 items-center gap-2">
           <div className="hidden h-11 items-center gap-3 px-2 sm:flex">
-            <Metric
-              icon={Ruler}
-              value={`${stats.distanceKm.toFixed(1)} km`}
-            />
+            <Metric icon={Ruler} value={`${stats.distanceKm.toFixed(1)} km`} />
             <span className="h-4 w-px bg-white/10" />
             <Metric
               icon={TrendingUp}
@@ -2514,7 +2430,7 @@ function ElevationPanel({
           <button
             type="button"
             aria-label="Collapse elevation profile"
-            className="grid size-7 place-items-center rounded-lg bg-[#2d2d2d] text-[#d6dbe0] transition-colors hover:bg-[#383838] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+            className="grid size-7 place-items-center rounded-lg bg-[#2d2d2d] text-[#d6dbe0] transition-colors hover:bg-[#383838] focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:outline-none"
             onClick={() => onOpenChange(false)}
           >
             <ChevronDown className="size-3.5" />
@@ -2592,9 +2508,9 @@ function ElevationChart({
 }) {
   const plotRef = React.useRef<HTMLDivElement>(null)
   const defaultPointIndex = Math.floor((track.coordinates.length - 1) / 2)
-  const [hoveredPointIndex, setHoveredPointIndex] = React.useState<number | null>(
-    null
-  )
+  const [hoveredPointIndex, setHoveredPointIndex] = React.useState<
+    number | null
+  >(null)
   const activePointIndex = hoveredPointIndex ?? defaultPointIndex
   const width = 1000
   const height = 126
@@ -2650,7 +2566,12 @@ function ElevationChart({
       ? (activePointIndex / (track.coordinates.length - 1)) * 100
       : 0
   const tooltipPercent = Math.min(92, Math.max(8, activePercent))
-  const yTicks = [chartMaximum, chartMaximum - tickStep, chartMaximum - tickStep * 2, chartMinimum]
+  const yTicks = [
+    chartMaximum,
+    chartMaximum - tickStep,
+    chartMaximum - tickStep * 2,
+    chartMinimum,
+  ]
   const xTicks = [0, 0.25, 0.5, 0.75, 1]
 
   const updateHoveredPoint = (event: React.PointerEvent<HTMLDivElement>) => {

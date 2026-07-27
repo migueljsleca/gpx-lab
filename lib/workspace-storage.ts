@@ -12,7 +12,6 @@ export type WorkspaceSnapshot = {
   activeTrackId: string
   sidebarOpen: boolean
   sidebarWidth?: number
-  searchOpen: boolean
   elevationOpen: boolean
   autoRouting?: boolean
 }
@@ -100,7 +99,6 @@ function isWorkspaceSnapshot(value: unknown): value is WorkspaceSnapshot {
     (workspace.sidebarWidth === undefined ||
       (typeof workspace.sidebarWidth === "number" &&
         Number.isFinite(workspace.sidebarWidth))) &&
-    typeof workspace.searchOpen === "boolean" &&
     typeof workspace.elevationOpen === "boolean" &&
     (workspace.autoRouting === undefined ||
       typeof workspace.autoRouting === "boolean")

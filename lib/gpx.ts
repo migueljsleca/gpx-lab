@@ -5,13 +5,7 @@ export type TrackCoordinate = [
 ]
 
 export type EditorTool =
-  | "select"
-  | "draw"
-  | "split"
-  | "crop"
-  | "simplify"
-  | "clean"
-  | "merge"
+  "select" | "draw" | "split" | "crop" | "simplify" | "clean" | "merge"
 
 export type GpxTrack = {
   id: string
