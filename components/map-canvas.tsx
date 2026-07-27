@@ -785,7 +785,7 @@ export function MapCanvas({
                 stroke="#121418"
                 strokeWidth="2"
               />
-              {activeTool === "select" &&
+              {activeTool === "draw" &&
                 track.points.map(({ index, position }) => (
                   <circle
                     key={index}
