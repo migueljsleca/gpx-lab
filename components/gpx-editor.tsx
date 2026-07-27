@@ -1527,7 +1527,7 @@ function TrackRow({
             type="button"
             aria-label={`${track.visible ? "Hide" : "Show"} ${track.name}`}
             className={cn(
-              "grid size-7 shrink-0 place-items-center rounded-md",
+              "grid size-7 shrink-0 place-items-center rounded-md opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none",
               track.visible
                 ? "text-muted-foreground hover:text-foreground"
                 : "text-inherit"
