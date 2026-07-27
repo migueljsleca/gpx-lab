@@ -10,10 +10,10 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileUp,
   Folder,
   FolderOpen,
   FolderPlus,
-  Import,
   MousePointer2,
   MoreHorizontal,
   PanelLeftClose,
@@ -734,7 +734,7 @@ export function GpxEditor() {
             >
               <div className="flex flex-col items-center text-center">
                 <span className="grid size-11 place-items-center rounded-xl border border-white/15 bg-white/10">
-                  <Import className="size-5" />
+                  <FileUp className="size-5" />
                 </span>
                 <p className="mt-3 text-sm font-semibold">Drop GPX to import</p>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -762,7 +762,7 @@ export function GpxEditor() {
                   className="mt-5"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <Import />
+                  <FileUp />
                   Import GPX file
                 </Button>
               </div>
@@ -1001,7 +1001,7 @@ function Sidebar({
             </div>
           )}
           <SidebarAction icon={Plus} label="New route" onClick={onNewRoute} />
-          <SidebarAction icon={Import} label="Import GPX" onClick={onImport} />
+          <SidebarAction icon={FileUp} label="Import GPX" onClick={onImport} />
         </nav>
 
         <div className="mt-5 min-h-0 flex-1 overflow-y-auto pr-0.5">
