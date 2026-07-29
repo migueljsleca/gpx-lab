@@ -7,15 +7,28 @@ import type {
   StyleSpecification,
 } from "maplibre-gl"
 
-import type { EditorTool, GpxTrack, TrackCoordinate } from "@/lib/gpx"
+import {
+  type MapStyleId,
+  type RouteLineWeight,
+} from "@/lib/editor-preferences"
+import {
+  getTrackAnchorIndices,
+  type EditorTool,
+  type GpxTrack,
+  type TrackCoordinate,
+} from "@/lib/gpx"
+import { metersToFeet, type UnitSystem } from "@/lib/units"
 
 const mapTilerKey = process.env.NEXT_PUBLIC_MAPTILER_KEY
-const mapTilerStyleUrl = mapTilerKey
-  ? `https://api.maptiler.com/maps/dataviz-v4-dark/style.json?key=${encodeURIComponent(mapTilerKey)}`
-  : null
 const mountainPeakSourceUrl = mapTilerKey
   ? `https://api.maptiler.com/tiles/v3/tiles.json?key=${encodeURIComponent(mapTilerKey)}`
   : null
+const mapTilerStyleIds: Record<MapStyleId, string> = {
+  dark: "dataviz-v4-dark",
+  topographic: "topo-v4-dark",
+  outdoors: "outdoor-v4-dark",
+  satellite: "hybrid",
+}
 
 const fallbackMapStyle: StyleSpecification = {
   version: 8,
@@ -44,6 +57,19 @@ const enhancedBasemapLineColors = {
   "Road bridge": "#4a4f54",
 } as const
 const trackSelectionWidth = 20
+const routeLineStrokeWidths: Record<
+  RouteLineWeight,
+  {
+    inactive: number
+    casing: number
+    active: number
+    preview: number
+  }
+> = {
+  thin: { inactive: 1, casing: 4, active: 2, preview: 1.5 },
+  standard: { inactive: 2.5, casing: 8, active: 4.5, preview: 3.5 },
+  bold: { inactive: 5, casing: 14, active: 8, preview: 6 },
+}
 
 function softenBasemapWater(map: MapLibreMap) {
   if (map.getLayer("Water")) {
@@ -182,7 +208,44 @@ function enhanceSettlementLabelContrast(map: MapLibreMap) {
   }
 }
 
-function addMountainPeakLabels(map: MapLibreMap) {
+function updateMountainPeakUnits(
+  map: MapLibreMap,
+  unitSystem: UnitSystem
+) {
+  const layerId = "Mountain peak labels"
+  if (!map.getLayer(layerId)) {
+    return
+  }
+
+  const elevation =
+    unitSystem === "imperial"
+      ? [
+          "round",
+          ["*", ["to-number", ["get", "ele"]], metersToFeet],
+        ]
+      : ["get", "ele"]
+
+  map.setLayoutProperty(layerId, "text-field", [
+    "concat",
+    ["get", "name"],
+    [
+      "case",
+      ["has", "ele"],
+      [
+        "concat",
+        "\n",
+        ["to-string", elevation],
+        unitSystem === "imperial" ? " ft" : " m",
+      ],
+      "",
+    ],
+  ])
+}
+
+function addMountainPeakLabels(
+  map: MapLibreMap,
+  unitSystem: UnitSystem
+) {
   if (!mountainPeakSourceUrl) {
     return
   }
@@ -253,6 +316,16 @@ function addMountainPeakLabels(map: MapLibreMap) {
       },
     })
   }
+
+  updateMountainPeakUnits(map, unitSystem)
+}
+
+function enhanceMapStyle(map: MapLibreMap, unitSystem: UnitSystem) {
+  softenBasemapWater(map)
+  enhanceBasemapLineContrast(map)
+  enhanceBuildingFootprintContrast(map)
+  enhanceSettlementLabelContrast(map)
+  addMountainPeakLabels(map, unitSystem)
 }
 
 function resizeMapToContainer(map: MapLibreMap) {
@@ -269,8 +342,8 @@ function resizeMapToContainer(map: MapLibreMap) {
   map.resize()
 }
 
-async function loadMapStyle(): Promise<StyleSpecification> {
-  if (!mapTilerStyleUrl) {
+async function loadMapStyle(mapStyle: MapStyleId): Promise<StyleSpecification> {
+  if (!mapTilerKey) {
     console.error(
       "[MapLibre] NEXT_PUBLIC_MAPTILER_KEY is not configured; falling back to OpenTopoMap"
     )
@@ -278,7 +351,8 @@ async function loadMapStyle(): Promise<StyleSpecification> {
   }
 
   try {
-    const styleResponse = await fetch(mapTilerStyleUrl)
+    const styleUrl = `https://api.maptiler.com/maps/${mapTilerStyleIds[mapStyle]}/style.json?key=${encodeURIComponent(mapTilerKey)}`
+    const styleResponse = await fetch(styleUrl)
 
     if (!styleResponse.ok) {
       throw new Error(
@@ -297,6 +371,10 @@ type MapCanvasProps = {
   tracks: GpxTrack[]
   activeTrackId: string
   activeTool: EditorTool
+  mapStyle: MapStyleId
+  routeLineWeight: RouteLineWeight
+  unitSystem: UnitSystem
+  hoveredElevationPointIndex: number | null
   onSelectTrack: (trackId: string) => void
   onAddPoint: (coordinate: TrackCoordinate) => void
   onMovePoint: (pointIndex: number, coordinate: TrackCoordinate) => void
@@ -343,6 +421,10 @@ export function MapCanvas({
   tracks,
   activeTrackId,
   activeTool,
+  mapStyle,
+  routeLineWeight,
+  unitSystem,
+  hoveredElevationPointIndex,
   onSelectTrack,
   onAddPoint,
   onMovePoint,
@@ -357,6 +439,11 @@ export function MapCanvas({
   const mapRef = React.useRef<MapLibreMap | null>(null)
   const mapLibraryRef = React.useRef<typeof import("maplibre-gl") | null>(null)
   const lastFittedTrackIdRef = React.useRef("")
+  const initialMapStyleRef = React.useRef(mapStyle)
+  const initialUnitSystemRef = React.useRef(unitSystem)
+  const unitSystemRef = React.useRef(unitSystem)
+  const appliedMapStyleRef = React.useRef<MapStyleId | null>(null)
+  const [mapInstance, setMapInstance] = React.useState<MapLibreMap | null>(null)
   const [ready, setReady] = React.useState(false)
   const interactionScope = `${activeTrackId}:${activeTool}`
   const [cropAnchor, setCropAnchor] = React.useState<{
@@ -374,6 +461,36 @@ export function MapCanvas({
   const [projectedTracks, setProjectedTracks] = React.useState<
     ProjectedTrack[]
   >([])
+  const anchorIndicesByTrackId = React.useMemo(
+    () =>
+      new Map(
+        tracks.map((track) => [
+          track.id,
+          new Set(getTrackAnchorIndices(track)),
+        ])
+      ),
+    [tracks]
+  )
+  const hoveredTrack = tracks.find((track) => track.id === activeTrackId)
+  const hoveredTrackCoordinate =
+    hoveredElevationPointIndex === null
+      ? null
+      : hoveredTrack?.coordinates[hoveredElevationPointIndex]
+  const hoveredTrackPoint =
+    ready && mapInstance && hoveredTrackCoordinate && hoveredTrack
+      ? {
+          color: hoveredTrack.color,
+          position: mapInstance.project([
+            hoveredTrackCoordinate[0],
+            hoveredTrackCoordinate[1],
+          ]),
+        }
+      : null
+  const routeStrokeWidths = routeLineStrokeWidths[routeLineWeight]
+
+  React.useEffect(() => {
+    unitSystemRef.current = unitSystem
+  }, [unitSystem])
 
   React.useEffect(() => {
     let cancelled = false
@@ -386,7 +503,7 @@ export function MapCanvas({
 
       const [maplibre, style] = await Promise.all([
         import("maplibre-gl"),
-        loadMapStyle(),
+        loadMapStyle(initialMapStyleRef.current),
       ])
 
       if (cancelled || !containerRef.current) {
@@ -420,16 +537,14 @@ export function MapCanvas({
 
       map.once("load", () => {
         if (!cancelled) {
-          softenBasemapWater(map)
-          enhanceBasemapLineContrast(map)
-          enhanceBuildingFootprintContrast(map)
-          enhanceSettlementLabelContrast(map)
-          addMountainPeakLabels(map)
+          enhanceMapStyle(map, initialUnitSystemRef.current)
           setReady(true)
         }
       })
 
       mapRef.current = map
+      appliedMapStyleRef.current = initialMapStyleRef.current
+      setMapInstance(map)
       resizeObserver = new ResizeObserver(() => {
         resizeMapToContainer(map)
       })
@@ -453,6 +568,41 @@ export function MapCanvas({
     }
   }, [])
 
+  React.useEffect(() => {
+    const map = mapInstance
+
+    if (!map || appliedMapStyleRef.current === mapStyle) {
+      return
+    }
+
+    let cancelled = false
+
+    void loadMapStyle(mapStyle).then((style) => {
+      if (cancelled || mapRef.current !== map) {
+        return
+      }
+
+      map.once("style.load", () => {
+        if (!cancelled && mapRef.current === map) {
+          enhanceMapStyle(map, unitSystemRef.current)
+          map.triggerRepaint()
+        }
+      })
+      appliedMapStyleRef.current = mapStyle
+      map.setStyle(style)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [mapInstance, mapStyle])
+
+  React.useEffect(() => {
+    if (mapInstance && ready) {
+      updateMountainPeakUnits(mapInstance, unitSystem)
+    }
+  }, [mapInstance, ready, unitSystem])
+
   const updateProjectedTracks = React.useCallback(() => {
     const map = mapRef.current
 
@@ -468,6 +618,8 @@ export function MapCanvas({
             const point = map.project([longitude, latitude])
             return [point.x, point.y] as [number, number]
           })
+          const anchorIndices =
+            anchorIndicesByTrackId.get(track.id) ?? new Set<number>()
 
           return {
             id: track.id,
@@ -485,15 +637,13 @@ export function MapCanvas({
               .map((position, index) => ({ index, position }))
               .filter(
                 ({ index }) =>
-                  index === 0 ||
-                  index === points.length - 1 ||
-                  (track.id === activeTrackId && index === cropAnchorIndex) ||
-                  index % Math.max(1, Math.ceil(points.length / 400)) === 0
+                  anchorIndices.has(index) ||
+                  (track.id === activeTrackId && index === cropAnchorIndex)
               ),
           }
         })
     )
-  }, [activeTrackId, cropAnchorIndex, tracks])
+  }, [activeTrackId, anchorIndicesByTrackId, cropAnchorIndex, tracks])
 
   React.useEffect(() => {
     const map = mapRef.current
@@ -621,13 +771,16 @@ export function MapCanvas({
     const maplibre = mapLibraryRef.current
     const activeTrack = tracks.find((track) => track.id === activeTrackId)
 
-    if (
-      !map ||
-      !maplibre ||
-      !ready ||
-      !activeTrack?.coordinates.length ||
-      lastFittedTrackIdRef.current === activeTrack.id
-    ) {
+    if (!map || !maplibre || !ready || !activeTrack) {
+      return
+    }
+
+    if (activeTrack.coordinates.length === 0) {
+      lastFittedTrackIdRef.current = activeTrack.id
+      return
+    }
+
+    if (lastFittedTrackIdRef.current === activeTrack.id) {
       return
     }
 
@@ -698,11 +851,7 @@ export function MapCanvas({
 
   return (
     <div className="absolute inset-0 bg-[#202326]">
-      <div
-        ref={containerRef}
-        className="size-full"
-        aria-label="Interactive map of the active GPX track"
-      />
+      <div ref={containerRef} className="size-full" />
       <svg
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 z-[2] size-full overflow-visible"
@@ -728,7 +877,7 @@ export function MapCanvas({
                 d={track.path}
                 fill="none"
                 stroke={track.color}
-                strokeWidth="2"
+                strokeWidth={routeStrokeWidths.inactive}
                 strokeOpacity="0.56"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -756,7 +905,7 @@ export function MapCanvas({
                 d={track.path}
                 fill="none"
                 stroke="white"
-                strokeWidth="8"
+                strokeWidth={routeStrokeWidths.casing}
                 strokeOpacity="0.65"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -765,7 +914,7 @@ export function MapCanvas({
                 d={track.path}
                 fill="none"
                 stroke={track.color}
-                strokeWidth="4"
+                strokeWidth={routeStrokeWidths.active}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -829,11 +978,27 @@ export function MapCanvas({
                 d={`M ${track.end[0]} ${track.end[1]} L ${drawPreviewPosition[0]} ${drawPreviewPosition[1]}`}
                 fill="none"
                 stroke={track.color}
-                strokeWidth="3"
+                strokeWidth={routeStrokeWidths.preview}
                 strokeDasharray="5 5"
                 strokeOpacity="0.8"
               />
             ))}
+        {hoveredTrackPoint && (
+          <g
+            data-elevation-hover-marker
+            transform={`translate(${hoveredTrackPoint.position.x} ${hoveredTrackPoint.position.y})`}
+          >
+            <circle
+              r="8"
+              fill="#101316"
+              fillOpacity="0.72"
+              stroke="#ffffff"
+              strokeWidth="2.5"
+              className="drop-shadow-md"
+            />
+            <circle r="4" fill={hoveredTrackPoint.color} />
+          </g>
+        )}
       </svg>
     </div>
   )

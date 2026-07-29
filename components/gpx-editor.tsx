@@ -14,13 +14,14 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Map as MapIcon,
   MousePointer2,
-  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   PencilLine,
   Plus,
   Redo2,
+  RotateCcw,
   Route,
   Ruler,
   Scissors,
@@ -31,12 +32,27 @@ import {
   TrendingUp,
   Trash2,
   Undo2,
+  Waypoints,
   X,
 } from "lucide-react"
-import { ContextMenu, Popover } from "radix-ui"
+import { AlertDialog, ContextMenu, Popover } from "radix-ui"
 
 import { MapCanvas } from "@/components/map-canvas"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   Tooltip,
   TooltipContent,
@@ -44,17 +60,40 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
+  defaultMapStyle,
+  defaultRouteLineWeight,
+  mapStyleDefaultsVersion,
+  mapStyleIds,
+  mapStyleLabels,
+  routeLineWeights,
+  routeLineWeightLabels,
+  type MapStyleId,
+  type RouteLineWeight,
+} from "@/lib/editor-preferences"
+import {
   calculateTrackStats,
   cleanTrackCoordinates,
+  getTrackAnchorIndices,
   parseGpx,
   serializeTrackToGpx,
-  simplifyTrackCoordinates,
+  simplifyTrackCoordinateIndices,
   trackColors,
   type EditorTool,
   type GpxTrack,
   type TrackCoordinate,
 } from "@/lib/gpx"
 import { getAutoRoute } from "@/lib/routing"
+import {
+  convertDistance,
+  convertElevation,
+  defaultUnitSystem,
+  elevationUnitName,
+  formatDistance,
+  formatElevation,
+  unitSystemLabels,
+  unitSystems,
+  type UnitSystem,
+} from "@/lib/units"
 import { cn } from "@/lib/utils"
 import {
   loadWorkspace,
@@ -80,7 +119,7 @@ const trackDragType = "application/x-gpx-lab-track"
 const trackContextItemClass =
   "flex h-8 select-none items-center gap-2 rounded-md px-2 outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/[0.08] data-[highlighted]:text-foreground"
 const floatingControlFrameClass =
-  "h-10 rounded-[8px] border border-white/[0.08] bg-[#101010] p-1 shadow-2xl backdrop-blur-md"
+  "h-10 rounded-[8px] border border-white/[0.08] bg-[#101010] p-1 backdrop-blur-md"
 const pillControlButtonClass =
   "hover:bg-white/[0.1] active:bg-white/[0.1] dark:hover:bg-white/[0.1] dark:active:bg-white/[0.1]"
 const sidebarMinWidth = 260
@@ -98,10 +137,10 @@ const trackColorLabels: Record<string, string> = {
 function BrandLogo() {
   return (
     <div className="flex shrink-0 items-baseline gap-1.5">
-      <span className="text-[19px] font-black tracking-[-0.07em] italic">
+      <span className="text-[19px] font-black tracking-[-0.045em] italic">
         GPX
       </span>
-      <span className="text-[16px] font-semibold tracking-[-0.04em]">Lab</span>
+      <span className="text-[16px] font-semibold tracking-[-0.02em]">Lab</span>
     </div>
   )
 }
@@ -116,6 +155,7 @@ function cloneTracks(tracks: GpxTrack[]) {
     coordinates: track.coordinates.map(
       (coordinate) => [...coordinate] as TrackCoordinate
     ),
+    anchorIndices: track.anchorIndices?.slice(),
   }))
 }
 
@@ -178,8 +218,19 @@ export function GpxEditor() {
   const [sidebarOpen, setSidebarOpen] = React.useState(true)
   const [sidebarTransitioning, setSidebarTransitioning] = React.useState(false)
   const [sidebarWidth, setSidebarWidth] = React.useState(sidebarMinWidth)
+  const [compactViewport, setCompactViewport] = React.useState(false)
   const [elevationOpen, setElevationOpen] = React.useState(false)
+  const [hoveredElevationPoint, setHoveredElevationPoint] = React.useState<{
+    trackId: string
+    index: number
+  } | null>(null)
   const [autoRouting, setAutoRouting] = React.useState(true)
+  const [mapStyle, setMapStyle] =
+    React.useState<MapStyleId>(defaultMapStyle)
+  const [routeLineWeight, setRouteLineWeight] =
+    React.useState<RouteLineWeight>(defaultRouteLineWeight)
+  const [unitSystem, setUnitSystem] =
+    React.useState<UnitSystem>(defaultUnitSystem)
   const [fileDragActive, setFileDragActive] = React.useState(false)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [undoStack, setUndoStack] = React.useState<GpxTrack[][]>([])
@@ -196,6 +247,11 @@ export function GpxEditor() {
 
   const activeTrack =
     tracks.find((track) => track.id === activeTrackId) ?? tracks[0]
+  const hoveredElevationPointIndex =
+    hoveredElevationPoint &&
+    hoveredElevationPoint.trackId === activeTrack?.id
+      ? hoveredElevationPoint.index
+      : null
   const stats = React.useMemo(
     () => (activeTrack ? calculateTrackStats(activeTrack) : null),
     [activeTrack]
@@ -215,10 +271,17 @@ export function GpxEditor() {
 
   React.useEffect(() => {
     let cancelled = false
+    let restoreTimedOut = false
+    const restoreTimeout = window.setTimeout(() => {
+      restoreTimedOut = true
+      persistenceDisabledRef.current = true
+      setNotice("This browser could not restore or save your workspace")
+      setWorkspaceReady(true)
+    }, 3500)
 
     loadWorkspace()
       .then((workspace) => {
-        if (cancelled || !workspace) {
+        if (cancelled || restoreTimedOut || !workspace) {
           return
         }
 
@@ -246,29 +309,59 @@ export function GpxEditor() {
         setTracks(restoredTracks)
         setFolders(restoredFolders)
         setActiveTrackId(restoredActiveTrackId)
-        setSidebarOpen(workspace.sidebarOpen)
+        setSidebarOpen(
+          window.matchMedia("(max-width: 639px)").matches
+            ? false
+            : workspace.sidebarOpen
+        )
         setSidebarWidth(
           clampSidebarWidth(workspace.sidebarWidth ?? sidebarMinWidth)
         )
         setElevationOpen(workspace.elevationOpen)
         setAutoRouting(workspace.autoRouting ?? true)
+        setMapStyle(
+          workspace.mapStyleDefaultsVersion === mapStyleDefaultsVersion
+            ? (workspace.mapStyle ?? defaultMapStyle)
+            : defaultMapStyle
+        )
+        setRouteLineWeight(
+          workspace.routeLineWeight ?? defaultRouteLineWeight
+        )
+        setUnitSystem(workspace.unitSystem ?? defaultUnitSystem)
       })
       .catch((error) => {
         persistenceDisabledRef.current = true
         console.error("[Workspace] Could not restore saved state", error)
-        if (!cancelled) {
+        if (!cancelled && !restoreTimedOut) {
           setNotice("This browser could not restore or save your workspace")
         }
       })
       .finally(() => {
-        if (!cancelled) {
+        window.clearTimeout(restoreTimeout)
+        if (!cancelled && !restoreTimedOut) {
           setWorkspaceReady(true)
         }
       })
 
     return () => {
       cancelled = true
+      window.clearTimeout(restoreTimeout)
     }
+  }, [])
+
+  React.useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)")
+    const updateViewport = () => {
+      setCompactViewport(media.matches)
+      if (media.matches) {
+        setSidebarOpen(false)
+        setSidebarTransitioning(false)
+      }
+    }
+
+    updateViewport()
+    media.addEventListener("change", updateViewport)
+    return () => media.removeEventListener("change", updateViewport)
   }, [])
 
   React.useEffect(() => {
@@ -285,6 +378,10 @@ export function GpxEditor() {
       sidebarWidth,
       elevationOpen,
       autoRouting,
+      mapStyle,
+      mapStyleDefaultsVersion,
+      routeLineWeight,
+      unitSystem,
     }
 
     void saveWorkspace(workspace).catch((error) => {
@@ -297,9 +394,12 @@ export function GpxEditor() {
     autoRouting,
     elevationOpen,
     folders,
+    mapStyle,
+    routeLineWeight,
     sidebarOpen,
     sidebarWidth,
     tracks,
+    unitSystem,
     workspaceReady,
   ])
 
@@ -418,6 +518,7 @@ export function GpxEditor() {
       color: trackColors[tracks.length % trackColors.length],
       visible: true,
       coordinates: [],
+      anchorIndices: [],
     }
 
     commitTracks([...tracks, route])
@@ -436,15 +537,32 @@ export function GpxEditor() {
       return
     }
 
-    const coordinates = simplifyTrackCoordinates(activeTrack.coordinates, 10)
+    const currentAnchorIndices = getTrackAnchorIndices(activeTrack)
+    const keptIndices = simplifyTrackCoordinateIndices(
+      activeTrack.coordinates,
+      10,
+      currentAnchorIndices
+    )
+    const coordinates = keptIndices.map(
+      (index) => activeTrack.coordinates[index]
+    )
     if (coordinates.length === activeTrack.coordinates.length) {
       setNotice("This route is already simple")
       return
     }
+    const nextIndexByCurrentIndex = new Map(
+      keptIndices.map((currentIndex, nextIndex) => [currentIndex, nextIndex])
+    )
+    const anchorIndices = currentAnchorIndices.flatMap((index) => {
+      const nextIndex = nextIndexByCurrentIndex.get(index)
+      return nextIndex === undefined ? [] : [nextIndex]
+    })
 
     commitTracks(
       tracks.map((track) =>
-        track.id === activeTrack.id ? { ...track, coordinates } : track
+        track.id === activeTrack.id
+          ? { ...track, coordinates, anchorIndices }
+          : track
       )
     )
     setNotice(
@@ -465,9 +583,22 @@ export function GpxEditor() {
       return
     }
 
+    const currentAnchorIndices = getTrackAnchorIndices(activeTrack)
+    const nextIndexByCoordinate = new Map(
+      coordinates.map((coordinate, index) => [coordinate, index])
+    )
+    const anchorIndices = currentAnchorIndices.flatMap((index) => {
+      const nextIndex = nextIndexByCoordinate.get(
+        activeTrack.coordinates[index]
+      )
+      return nextIndex === undefined ? [] : [nextIndex]
+    })
+
     commitTracks(
       tracks.map((track) =>
-        track.id === activeTrack.id ? { ...track, coordinates } : track
+        track.id === activeTrack.id
+          ? { ...track, coordinates, anchorIndices }
+          : track
       )
     )
     setNotice(
@@ -502,6 +633,7 @@ export function GpxEditor() {
       ...activeTrack,
       name: `${activeTrack.name} merged`,
       coordinates: mergeCoordinates(mergeTracks),
+      anchorIndices: undefined,
     }
     const activeIndex = tracks.findIndex((track) => track.id === activeTrack.id)
     const nextTracks = tracks.filter((track) => !mergedTrackIds.has(track.id))
@@ -510,7 +642,45 @@ export function GpxEditor() {
     setNotice(`Merged ${mergeTracks.length} visible routes`)
   }
 
+  function getToolUnavailableReason(tool: EditorTool) {
+    if (tool === "draw") {
+      return null
+    }
+    if (!activeTrack) {
+      return "Create or import a route first"
+    }
+    if (
+      (tool === "split" || tool === "crop" || tool === "simplify") &&
+      activeTrack.coordinates.length < 3
+    ) {
+      return `Add at least three route points to ${tool}`
+    }
+    if (tool === "clean" && activeTrack.coordinates.length === 0) {
+      return "Add route points to clean"
+    }
+    if (
+      tool === "merge" &&
+      (activeTrack.coordinates.length === 0 ||
+        !tracks.some(
+          (track) =>
+            track.id !== activeTrack.id &&
+            track.visible &&
+            track.coordinates.length > 0
+        ))
+    ) {
+      return "Show another route with points to merge"
+    }
+
+    return null
+  }
+
   function chooseTool(tool: EditorTool) {
+    const unavailableReason = getToolUnavailableReason(tool)
+    if (unavailableReason) {
+      setNotice(unavailableReason)
+      return
+    }
+
     if (tool !== "draw") {
       cancelPendingRouting()
     }
@@ -534,14 +704,6 @@ export function GpxEditor() {
       createNewRoute()
       return
     }
-    if (
-      (tool === "split" || tool === "crop") &&
-      (!activeTrack || activeTrack.coordinates.length < 3)
-    ) {
-      setNotice(`This route does not have enough points to ${tool}`)
-      return
-    }
-
     setActiveTool(tool)
     setNotice(null)
   }
@@ -562,6 +724,10 @@ export function GpxEditor() {
             ? {
                 ...track,
                 coordinates: [...track.coordinates, coordinate],
+                anchorIndices: [
+                  ...getTrackAnchorIndices(track),
+                  track.coordinates.length,
+                ],
               }
             : track
         )
@@ -605,6 +771,12 @@ export function GpxEditor() {
                   ...track.coordinates.slice(0, -1),
                   ...routeCoordinates,
                 ],
+                anchorIndices: Array.from(
+                  new Set([
+                    ...getTrackAnchorIndices(track),
+                    track.coordinates.length + routeCoordinates.length - 2,
+                  ])
+                ),
               }
             : track
         )
@@ -616,8 +788,8 @@ export function GpxEditor() {
 
       setNotice(
         error instanceof Error
-          ? `${error.message}. Turn Auto-routing off to draw directly.`
-          : "Auto-routing failed. Turn it off to draw directly."
+          ? `${error.message}. Turn off Auto-route to draw directly.`
+          : "Auto-route failed. Turn it off to draw directly."
       )
     } finally {
       if (routingRequestRef.current === controller) {
@@ -679,12 +851,28 @@ export function GpxEditor() {
       ...activeTrack,
       name: `${activeTrack.name} 1`,
       coordinates: activeTrack.coordinates.slice(0, pointIndex + 1),
+      anchorIndices: Array.from(
+        new Set([
+          ...getTrackAnchorIndices(activeTrack).filter(
+            (index) => index <= pointIndex
+          ),
+          pointIndex,
+        ])
+      ),
     }
     const second: GpxTrack = {
       ...activeTrack,
       id: `split-${crypto.randomUUID()}`,
       name: `${activeTrack.name} 2`,
       coordinates: activeTrack.coordinates.slice(pointIndex),
+      anchorIndices: Array.from(
+        new Set([
+          0,
+          ...getTrackAnchorIndices(activeTrack)
+            .filter((index) => index >= pointIndex)
+            .map((index) => index - pointIndex),
+        ])
+      ),
     }
     const trackIndex = tracks.findIndex((track) => track.id === activeTrack.id)
     const nextTracks = tracks.filter((track) => track.id !== activeTrack.id)
@@ -708,9 +896,20 @@ export function GpxEditor() {
     }
 
     const coordinates = activeTrack.coordinates.slice(firstIndex, lastIndex + 1)
+    const anchorIndices = Array.from(
+      new Set([
+        0,
+        lastIndex - firstIndex,
+        ...getTrackAnchorIndices(activeTrack)
+          .filter((index) => index >= firstIndex && index <= lastIndex)
+          .map((index) => index - firstIndex),
+      ])
+    ).sort((first, second) => first - second)
     commitTracks(
       tracks.map((track) =>
-        track.id === activeTrack.id ? { ...track, coordinates } : track
+        track.id === activeTrack.id
+          ? { ...track, coordinates, anchorIndices }
+          : track
       )
     )
     setActiveTool("select")
@@ -777,6 +976,9 @@ export function GpxEditor() {
     cancelPendingRouting()
     setActiveTrackId(trackId)
     setActiveTool("select")
+    if (compactViewport) {
+      closeSidebar()
+    }
   }
 
   function toggleTrackVisibility(trackId: string) {
@@ -859,6 +1061,7 @@ export function GpxEditor() {
       id: `duplicate-${crypto.randomUUID()}`,
       name: copyName,
       coordinates: source.coordinates.slice(),
+      anchorIndices: source.anchorIndices?.slice(),
     }
     const nextTracks = [...tracks]
     nextTracks.splice(sourceIndex + 1, 0, duplicate)
@@ -1076,6 +1279,38 @@ export function GpxEditor() {
     )
   }
 
+  function resetSettings() {
+    cancelPendingRouting()
+    setMapStyle(defaultMapStyle)
+    setRouteLineWeight(defaultRouteLineWeight)
+    setUnitSystem(defaultUnitSystem)
+    setAutoRouting(true)
+    setNotice("Settings reset to defaults")
+  }
+
+  function clearWorkspace() {
+    cancelPendingRouting()
+    tracksRef.current = []
+    undoStackRef.current = []
+    redoStackRef.current = []
+    pointDragSnapshotRef.current = null
+    fileDragDepthRef.current = 0
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+
+    setTracks([])
+    setFolders([])
+    setActiveTrackId("")
+    setActiveTool("select")
+    setElevationOpen(false)
+    setHoveredElevationPoint(null)
+    setFileDragActive(false)
+    setUndoStack([])
+    setRedoStack([])
+    setNotice("Workspace cleared")
+  }
+
   function moveTrackToFolder(trackId: string, folder: string) {
     const movingTrack = tracks.find((track) => track.id === trackId)
     if (!movingTrack || movingTrack.folder === folder) {
@@ -1144,14 +1379,6 @@ export function GpxEditor() {
     }
   }
 
-  if (!workspaceReady) {
-    return (
-      <main className="grid h-svh w-full place-items-center bg-background text-foreground">
-        <p className="text-sm text-muted-foreground">Restoring workspace…</p>
-      </main>
-    )
-  }
-
   const collapsedControlReady = !sidebarOpen && !sidebarTransitioning
   const controlUsesCollapsedLayout = collapsedControlReady
   const closingSidebar = !sidebarOpen && sidebarTransitioning
@@ -1159,9 +1386,13 @@ export function GpxEditor() {
   return (
     <TooltipProvider delayDuration={280}>
       <main className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
+        <h1 className="sr-only">GPX Lab route editor</h1>
         <input
           ref={fileInputRef}
           type="file"
+          name="gpx-file"
+          aria-label="Import GPX file"
+          tabIndex={-1}
           className="sr-only"
           accept=".gpx,application/gpx+xml,application/xml,text/xml"
           onChange={importFile}
@@ -1214,6 +1445,10 @@ export function GpxEditor() {
           tracks={tracks}
           groupedTracks={groupedTracks}
           activeTrackId={activeTrackId}
+          mapStyle={mapStyle}
+          routeLineWeight={routeLineWeight}
+          unitSystem={unitSystem}
+          autoRouting={autoRouting}
           onLayoutTransitionEnd={() => setSidebarTransitioning(false)}
           onWidthChange={setSidebarWidth}
           onNewRoute={createNewRoute}
@@ -1229,10 +1464,30 @@ export function GpxEditor() {
           onDeleteFolder={deleteFolder}
           onMoveTrackToFolder={moveTrackToFolder}
           onMoveTrackRelative={moveTrackRelative}
+          onMapStyleChange={setMapStyle}
+          onRouteLineWeightChange={setRouteLineWeight}
+          onUnitSystemChange={setUnitSystem}
+          onAutoRoutingChange={changeAutoRouting}
+          onResetSettings={resetSettings}
+          onClearWorkspace={clearWorkspace}
         />
+
+        {sidebarOpen && compactViewport && (
+          <button
+            type="button"
+            aria-label="Close sidebar"
+            className="absolute inset-0 z-30 bg-black/45 sm:hidden"
+            onClick={closeSidebar}
+          />
+        )}
 
         <section
           className="map-shell relative min-w-0 flex-1 overflow-hidden"
+          style={
+            {
+              "--sidebar-offset": sidebarOpen ? `${sidebarWidth}px` : "0px",
+            } as React.CSSProperties
+          }
           onDragEnter={handleFileDragEnter}
           onDragOver={handleFileDragOver}
           onDragLeave={handleFileDragLeave}
@@ -1242,6 +1497,10 @@ export function GpxEditor() {
             tracks={tracks}
             activeTrackId={activeTrackId}
             activeTool={activeTool}
+            mapStyle={mapStyle}
+            routeLineWeight={routeLineWeight}
+            unitSystem={unitSystem}
+            hoveredElevationPointIndex={hoveredElevationPointIndex}
             onSelectTrack={selectTrack}
             onAddPoint={addRoutePoint}
             onMovePoint={moveRoutePoint}
@@ -1272,11 +1531,11 @@ export function GpxEditor() {
 
           {!activeTrack && (
             <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center p-6">
-              <div className="pointer-events-auto flex w-full max-w-[320px] flex-col items-center rounded-2xl border border-white/[0.1] bg-[#181b20]/95 px-7 py-8 text-center shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
+              <div className="sidebar-aware-shift pointer-events-auto relative flex w-full max-w-[320px] flex-col items-center rounded-2xl border border-white/[0.1] bg-[#181b20]/95 px-7 py-8 text-center shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
                 <span className="grid size-10 place-items-center rounded-xl border border-white/[0.08] bg-white/[0.05] text-muted-foreground">
                   <Route className="size-4" />
                 </span>
-                <h1 className="mt-4 text-sm font-semibold">No GPX files yet</h1>
+                <h2 className="mt-4 text-sm font-semibold">No GPX files yet</h2>
                 <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                   Import your first GPX file to view and edit it on the map.
                 </p>
@@ -1294,7 +1553,7 @@ export function GpxEditor() {
                   className="mt-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
                   onClick={createNewRoute}
                 >
-                  Or draw a new route
+                  Draw a new route
                 </button>
               </div>
             </div>
@@ -1307,6 +1566,7 @@ export function GpxEditor() {
               onChooseTool={chooseTool}
               canUndo={undoStack.length > 0}
               canRedo={redoStack.length > 0}
+              getUnavailableReason={getToolUnavailableReason}
               onUndo={undo}
               onRedo={redo}
               onExport={exportActiveTrack}
@@ -1321,21 +1581,39 @@ export function GpxEditor() {
             />
           )}
 
-          {notice && (
-            <div
-              role="status"
-              className="absolute top-16 left-1/2 z-30 -translate-x-1/2 animate-in rounded-lg border border-white/10 bg-[#181b20]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur-md fade-in slide-in-from-top-1"
-            >
-              {notice}
-            </div>
-          )}
+          <div
+            role="status"
+            aria-live="polite"
+            className={cn(
+              "sidebar-aware-center absolute top-[108px] left-1/2 z-30 -translate-x-1/2 rounded-lg border border-white/10 bg-[#181b20]/95 px-3 py-2 text-xs backdrop-blur-md transition-[opacity,transform] sm:top-16",
+              notice
+                ? "translate-y-0 opacity-100"
+                : "pointer-events-none -translate-y-1 opacity-0"
+            )}
+          >
+            {notice ?? ""}
+          </div>
 
           {activeTrack && activeTrack.coordinates.length > 1 && stats && (
             <ElevationPanel
               track={activeTrack}
               stats={stats}
+              unitSystem={unitSystem}
               open={elevationOpen}
-              onOpenChange={setElevationOpen}
+              hoveredPointIndex={hoveredElevationPointIndex}
+              onHoveredPointChange={(pointIndex) =>
+                setHoveredElevationPoint(
+                  pointIndex === null
+                    ? null
+                    : { trackId: activeTrack.id, index: pointIndex }
+                )
+              }
+              onOpenChange={(open) => {
+                setElevationOpen(open)
+                if (!open) {
+                  setHoveredElevationPoint(null)
+                }
+              }}
             />
           )}
         </section>
@@ -1350,6 +1628,10 @@ type SidebarProps = {
   tracks: GpxTrack[]
   groupedTracks: { name: string; tracks: GpxTrack[] }[]
   activeTrackId: string
+  mapStyle: MapStyleId
+  routeLineWeight: RouteLineWeight
+  unitSystem: UnitSystem
+  autoRouting: boolean
   onLayoutTransitionEnd: () => void
   onWidthChange: (width: number) => void
   onNewRoute: () => void
@@ -1364,6 +1646,12 @@ type SidebarProps = {
   onRenameFolder: (name: string, nextName: string) => boolean
   onDeleteFolder: (name: string) => void
   onMoveTrackToFolder: (trackId: string, folder: string) => void
+  onMapStyleChange: (mapStyle: MapStyleId) => void
+  onRouteLineWeightChange: (weight: RouteLineWeight) => void
+  onUnitSystemChange: (unitSystem: UnitSystem) => void
+  onAutoRoutingChange: (enabled: boolean) => void
+  onResetSettings: () => void
+  onClearWorkspace: () => void
   onMoveTrackRelative: (
     trackId: string,
     targetTrackId: string,
@@ -1377,6 +1665,10 @@ function Sidebar({
   tracks,
   groupedTracks,
   activeTrackId,
+  mapStyle,
+  routeLineWeight,
+  unitSystem,
+  autoRouting,
   onLayoutTransitionEnd,
   onWidthChange,
   onNewRoute,
@@ -1392,6 +1684,12 @@ function Sidebar({
   onDeleteFolder,
   onMoveTrackToFolder,
   onMoveTrackRelative,
+  onMapStyleChange,
+  onRouteLineWeightChange,
+  onUnitSystemChange,
+  onAutoRoutingChange,
+  onResetSettings,
+  onClearWorkspace,
 }: SidebarProps) {
   const [creatingFolder, setCreatingFolder] = React.useState(false)
   const [folderName, setFolderName] = React.useState("")
@@ -1488,8 +1786,11 @@ function Sidebar({
     }
   }
 
+  const sidebarCssWidth = `min(${width}px, calc(100vw - 56px))`
+
   return (
     <aside
+      inert={!open}
       className={cn(
         "absolute inset-y-0 left-0 z-40 h-svh overflow-hidden border-r border-white/[0.06] bg-[#101010]",
         resizing
@@ -1497,17 +1798,24 @@ function Sidebar({
           : "transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]",
         !open && "pointer-events-none -translate-x-full"
       )}
-      style={{ width }}
+      style={{ width: sidebarCssWidth }}
       onTransitionEnd={(event) => {
         if (event.target === event.currentTarget) {
           onLayoutTransitionEnd()
         }
       }}
     >
-      <div className="flex h-full flex-col px-3 py-5" style={{ width }}>
+      <div
+        className="flex h-full flex-col px-3 py-5"
+        style={{ width: sidebarCssWidth }}
+      >
         <nav aria-label="Main actions" className="mt-11 space-y-1">
           <SidebarAction icon={Plus} label="New route" onClick={onNewRoute} />
-          <SidebarAction icon={FileUp} label="Import GPX" onClick={onImport} />
+          <SidebarAction
+            icon={FileUp}
+            label="Import GPX file"
+            onClick={onImport}
+          />
         </nav>
 
         <div className="mt-5 min-h-0 flex-1 overflow-y-auto pr-0.5">
@@ -1537,7 +1845,7 @@ function Sidebar({
                   maxLength={48}
                   placeholder="Folder name"
                   aria-label="Folder name"
-                  className="h-7 min-w-0 flex-1 bg-transparent px-1 text-xs outline-none placeholder:text-muted-foreground/60"
+                  className="h-8 min-w-0 flex-1 bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground/60 sm:h-7 sm:text-xs"
                   onChange={(event) => setFolderName(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") {
@@ -1591,7 +1899,7 @@ function Sidebar({
                     className="mt-1.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
                     onClick={onImport}
                   >
-                    Import your first GPX file
+                    Import GPX file
                   </button>
                 </div>
               )}
@@ -1599,10 +1907,18 @@ function Sidebar({
           </div>
         </div>
 
-        <SidebarAction
-          icon={Settings}
-          label="Settings"
-          onClick={() => undefined}
+        <SettingsMenu
+          mapStyle={mapStyle}
+          routeLineWeight={routeLineWeight}
+          unitSystem={unitSystem}
+          autoRouting={autoRouting}
+          hasWorkspaceContent={tracks.length > 0 || groupedTracks.length > 0}
+          onMapStyleChange={onMapStyleChange}
+          onRouteLineWeightChange={onRouteLineWeightChange}
+          onUnitSystemChange={onUnitSystemChange}
+          onAutoRoutingChange={onAutoRoutingChange}
+          onResetSettings={onResetSettings}
+          onClearWorkspace={onClearWorkspace}
         />
       </div>
       <div
@@ -1614,7 +1930,7 @@ function Sidebar({
         aria-valuenow={Math.round(width)}
         tabIndex={0}
         className={cn(
-          "absolute inset-y-0 right-0 z-50 w-1.5 cursor-col-resize touch-none outline-none focus-visible:bg-white/[0.08]",
+          "sidebar-resizer absolute inset-y-0 right-0 z-50 hidden w-1.5 cursor-col-resize touch-none outline-none focus-visible:bg-route sm:block",
           resizing && "bg-white/[0.06]"
         )}
         onDoubleClick={() => onWidthChange(sidebarMinWidth)}
@@ -1626,6 +1942,232 @@ function Sidebar({
         onLostPointerCapture={finishResize}
       />
     </aside>
+  )
+}
+
+function SettingsMenu({
+  mapStyle,
+  routeLineWeight,
+  unitSystem,
+  autoRouting,
+  hasWorkspaceContent,
+  onMapStyleChange,
+  onRouteLineWeightChange,
+  onUnitSystemChange,
+  onAutoRoutingChange,
+  onResetSettings,
+  onClearWorkspace,
+}: {
+  mapStyle: MapStyleId
+  routeLineWeight: RouteLineWeight
+  unitSystem: UnitSystem
+  autoRouting: boolean
+  hasWorkspaceContent: boolean
+  onMapStyleChange: (mapStyle: MapStyleId) => void
+  onRouteLineWeightChange: (weight: RouteLineWeight) => void
+  onUnitSystemChange: (unitSystem: UnitSystem) => void
+  onAutoRoutingChange: (enabled: boolean) => void
+  onResetSettings: () => void
+  onClearWorkspace: () => void
+}) {
+  const [clearDialogOpen, setClearDialogOpen] = React.useState(false)
+  const menuItemClass = "h-8 px-2 text-xs"
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] text-foreground/90 outline-none transition-[color,background-color] hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30 data-[state=open]:bg-white/[0.08]"
+          >
+            <Settings className="size-4" />
+            <span>Settings</span>
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          side="top"
+          align="start"
+          sideOffset={8}
+          className="w-[min(252px,calc(100vw-24px))] rounded-xl border border-white/[0.1] bg-[#1b1e22] p-1.5 shadow-none"
+        >
+          <DropdownMenuLabel className="px-2 py-1.5 text-xs leading-4 font-medium text-white/45">
+            Settings
+          </DropdownMenuLabel>
+
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className={menuItemClass}>
+              <MapIcon className="size-4 text-muted-foreground" />
+              <span>Map style</span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent
+              sideOffset={7}
+              className="min-w-[124px] rounded-xl border border-white/[0.1] bg-[#1b1e22] p-1.5 shadow-none sm:min-w-40"
+            >
+              <DropdownMenuRadioGroup
+                value={mapStyle}
+                onValueChange={(value) =>
+                  onMapStyleChange(value as MapStyleId)
+                }
+              >
+                {mapStyleIds.map((styleId) => (
+                  <DropdownMenuRadioItem
+                    key={styleId}
+                    value={styleId}
+                    className={menuItemClass}
+                  >
+                    {mapStyleLabels[styleId]}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className={menuItemClass}>
+              <Route className="size-4 text-muted-foreground" />
+              <span>Route line</span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent
+              sideOffset={7}
+              className="min-w-[124px] rounded-xl border border-white/[0.1] bg-[#1b1e22] p-1.5 shadow-none sm:min-w-36"
+            >
+              <DropdownMenuRadioGroup
+                value={routeLineWeight}
+                onValueChange={(value) =>
+                  onRouteLineWeightChange(value as RouteLineWeight)
+                }
+              >
+                {routeLineWeights.map((weight) => (
+                  <DropdownMenuRadioItem
+                    key={weight}
+                    value={weight}
+                    className={menuItemClass}
+                  >
+                    {routeLineWeightLabels[weight]}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className={menuItemClass}>
+              <Ruler className="size-4 text-muted-foreground" />
+              <span>Units</span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent
+              sideOffset={7}
+              className="min-w-[124px] rounded-xl border border-white/[0.1] bg-[#1b1e22] p-1.5 shadow-none sm:min-w-36"
+            >
+              <DropdownMenuRadioGroup
+                value={unitSystem}
+                onValueChange={(value) =>
+                  onUnitSystemChange(value as UnitSystem)
+                }
+              >
+                {unitSystems.map((system) => (
+                  <DropdownMenuRadioItem
+                    key={system}
+                    value={system}
+                    className={menuItemClass}
+                  >
+                    {unitSystemLabels[system]}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+
+          <DropdownMenuCheckboxItem
+            checked={autoRouting}
+            className={cn(
+              menuItemClass,
+              "[&>[data-slot=dropdown-menu-checkbox-item-indicator]]:hidden"
+            )}
+            onCheckedChange={(checked) =>
+              onAutoRoutingChange(checked === true)
+            }
+            onSelect={(event) => event.preventDefault()}
+          >
+            <Waypoints className="size-4 text-muted-foreground" />
+            <span>Auto-route</span>
+            <span
+              aria-hidden="true"
+              className={cn(
+                "relative ml-auto h-3.5 w-6 overflow-hidden rounded-full ring-1 ring-inset transition-colors duration-150",
+                autoRouting
+                  ? "bg-[#f1f2f3] ring-white/90"
+                  : "bg-[#30343a] ring-white/10"
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute top-1/2 left-0.5 size-2.5 -translate-y-1/2 rounded-full transition-[transform,background-color] duration-150",
+                  autoRouting
+                    ? "translate-x-2.5 bg-[#3b3f45]"
+                    : "translate-x-0 bg-white/65"
+                )}
+              />
+            </span>
+          </DropdownMenuCheckboxItem>
+
+          <DropdownMenuSeparator className="my-1.5 bg-white/[0.08]" />
+
+          <DropdownMenuItem
+            className={menuItemClass}
+            onSelect={onResetSettings}
+          >
+            <RotateCcw className="size-4 text-muted-foreground" />
+            <span>Reset settings</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={!hasWorkspaceContent}
+            className={menuItemClass}
+            onSelect={() => setClearDialogOpen(true)}
+          >
+            <Trash2 className="size-4" />
+            <span>Clear workspace…</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <AlertDialog.Root
+        open={clearDialogOpen}
+        onOpenChange={setClearDialogOpen}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-[2px] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+          <AlertDialog.Content className="fixed top-1/2 left-1/2 z-[80] w-[min(360px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-white/[0.1] bg-[#1b1e22] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)] outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95">
+            <AlertDialog.Title className="text-sm font-semibold">
+              Clear workspace?
+            </AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 text-xs leading-5 text-muted-foreground">
+              This deletes every imported and drawn route, along with your
+              folders. Your settings will stay the same. This can&apos;t be
+              undone.
+            </AlertDialog.Description>
+            <div className="mt-5 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <Button variant="ghost" size="sm">
+                  Cancel
+                </Button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center justify-center rounded-lg bg-[#d84a4a] px-3 text-xs font-medium text-white outline-none transition-[background-color,transform] hover:bg-[#e05555] focus-visible:ring-2 focus-visible:ring-white/35 active:scale-[0.96]"
+                  onClick={onClearWorkspace}
+                >
+                  Clear workspace
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+    </>
   )
 }
 
@@ -1644,7 +2186,7 @@ function SidebarAction({
     <button
       type="button"
       className={cn(
-        "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] transition-colors",
+        "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] outline-none transition-[color,background-color] focus-visible:ring-2 focus-visible:ring-white/30",
         active
           ? "bg-white/[0.08] text-foreground"
           : "text-foreground/90 hover:bg-white/[0.06]"
@@ -1756,7 +2298,7 @@ function TrackFolder({
                 value={draftName}
                 maxLength={48}
                 aria-label={`Rename ${name}`}
-                className="h-6 min-w-0 flex-1 rounded border border-white/[0.14] bg-black/25 px-1.5 text-[13px] outline-none focus:border-white/25 focus:ring-2 focus:ring-white/[0.08]"
+                className="h-8 min-w-0 flex-1 rounded border border-white/[0.14] bg-black/25 px-1.5 text-base outline-none focus:border-white/25 focus:ring-2 focus:ring-white/[0.08] sm:h-6 sm:text-[13px] sm:leading-4 sm:font-[450]"
                 onChange={(event) => setDraftName(event.target.value)}
                 onBlur={commitRename}
                 onKeyDown={(event) => {
@@ -1772,7 +2314,7 @@ function TrackFolder({
             <button
               type="button"
               aria-expanded={open}
-              className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] transition-colors hover:bg-white/[0.04]"
+              className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] leading-4 font-[450] transition-colors hover:bg-white/[0.04]"
               onClick={() => setOpen((current) => !current)}
             >
               {open ? (
@@ -1871,7 +2413,7 @@ function TrackFolder({
             {tracks.length === 0 && (
               <div
                 className={cn(
-                  "mx-1 rounded-md border border-dashed border-white/[0.09] px-3 py-2 text-[11px] text-muted-foreground/70 transition-opacity duration-150 motion-reduce:transition-none",
+                  "mx-1 rounded-md border border-dashed border-white/[0.09] px-3 py-2 text-xs leading-4 text-muted-foreground/70 transition-opacity duration-150 motion-reduce:transition-none",
                   open ? "opacity-100" : "opacity-0"
                 )}
               >
@@ -2007,7 +2549,7 @@ function TrackRow({
                 value={draftName}
                 maxLength={80}
                 aria-label={`Rename ${track.name}`}
-                className="h-6 min-w-0 flex-1 rounded border border-white/[0.14] bg-black/25 px-1.5 text-[13px] outline-none focus:border-white/25 focus:ring-2 focus:ring-white/[0.08]"
+                className="h-8 min-w-0 flex-1 rounded border border-white/[0.14] bg-black/25 px-1.5 text-base outline-none focus:border-white/25 focus:ring-2 focus:ring-white/[0.08] sm:h-6 sm:text-[13px] sm:leading-4 sm:font-[450]"
                 onChange={(event) => setDraftName(event.target.value)}
                 onBlur={commitRename}
                 onKeyDown={(event) => {
@@ -2022,7 +2564,7 @@ function TrackRow({
           ) : (
             <button
               type="button"
-              className="ml-2 flex min-w-0 flex-1 items-center py-1 pr-1 text-left text-[13px]"
+              className="ml-2 flex min-w-0 flex-1 items-center py-1 pr-1 text-left text-[13px] leading-4 font-[450]"
               onClick={onSelect}
               onDoubleClick={(event) => {
                 event.preventDefault()
@@ -2118,7 +2660,7 @@ function TrackColorPicker({
           draggable={false}
           aria-label={`Change color for ${trackName}`}
           title="Change track color"
-          className="grid h-7 w-3.5 shrink-0 place-items-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+          className="grid size-7 shrink-0 place-items-center rounded-md outline-none transition-colors hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30"
         >
           <Route className="size-4" style={muted ? undefined : { color }} />
         </button>
@@ -2129,7 +2671,7 @@ function TrackColorPicker({
           align="center"
           sideOffset={6}
           collisionPadding={8}
-          className="z-50 flex items-center rounded-[7px] border border-white/[0.1] bg-[#181b20]/98 p-1 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-xl outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+          className="z-50 flex items-center gap-1 rounded-[9px] border border-white/[0.1] bg-[#181b20]/98 p-1 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-xl outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
         >
           <Popover.Title className="sr-only">
             Choose a color for {trackName}
@@ -2145,7 +2687,7 @@ function TrackColorPicker({
                   aria-pressed={selected}
                   title={trackColorLabels[trackColor]}
                   className={cn(
-                    "grid size-5 place-items-center rounded-full transition-transform outline-none hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
+                    "grid size-7 place-items-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
                     selected &&
                       "ring-2 ring-white/90 ring-offset-1 ring-offset-[#181b20]"
                   )}
@@ -2153,7 +2695,7 @@ function TrackColorPicker({
                 >
                   <span
                     aria-hidden="true"
-                    className="size-3 rounded-full"
+                    className="size-3.5 rounded-full"
                     style={{ backgroundColor: trackColor }}
                   />
                 </button>
@@ -2172,6 +2714,7 @@ function MapHeader({
   onChooseTool,
   canUndo,
   canRedo,
+  getUnavailableReason,
   onUndo,
   onRedo,
   onExport,
@@ -2181,46 +2724,53 @@ function MapHeader({
   onChooseTool: (tool: EditorTool) => void
   canUndo: boolean
   canRedo: boolean
+  getUnavailableReason: (tool: EditorTool) => string | null
   onUndo: () => void
   onRedo: () => void
   onExport: () => void
 }) {
   return (
-    <header className="pointer-events-none absolute top-3 right-3 left-3 z-20 flex h-10 items-start justify-end gap-3">
+    <header className="pointer-events-none absolute top-14 right-3 left-3 z-20 flex h-10 items-start justify-end gap-3 sm:top-3">
       <div
         className={cn(
           floatingControlFrameClass,
-          "pointer-events-auto absolute left-1/2 flex -translate-x-1/2 items-center"
+          "sidebar-aware-center pointer-events-auto absolute left-1/2 flex -translate-x-1/2 items-center"
         )}
       >
-        {editorTools.map(({ id, label, icon: Icon }) => (
-          <React.Fragment key={id}>
-            <Tooltip>
+        {editorTools.map(({ id, label, icon: Icon }) => {
+          const unavailableReason = getUnavailableReason(id)
+
+          return (
+            <Tooltip key={id}>
               <TooltipTrigger asChild>
                 <Button
                   aria-label={label}
                   aria-pressed={activeTool === id}
-                  disabled={!hasActiveTrack && id !== "draw"}
+                  aria-disabled={unavailableReason ? true : undefined}
                   variant="ghost"
                   size="icon-sm"
-                  className="rounded-lg text-muted-foreground hover:bg-white/[0.1] hover:text-foreground aria-pressed:bg-white/[0.1] aria-pressed:text-foreground dark:hover:bg-white/[0.1]"
-                  onClick={() => onChooseTool(id)}
+                  className="rounded-lg text-muted-foreground hover:bg-white/[0.1] hover:text-foreground aria-disabled:cursor-not-allowed aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-pressed:bg-white/[0.1] aria-pressed:text-foreground dark:hover:bg-white/[0.1]"
+                  onClick={() => {
+                    if (!unavailableReason) {
+                      onChooseTool(id)
+                    }
+                  }}
                 >
                   <Icon />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom" sideOffset={8}>
-                {label}
+                {unavailableReason ?? label}
               </TooltipContent>
             </Tooltip>
-          </React.Fragment>
-        ))}
+          )
+        })}
       </div>
 
       <div
         className={cn(
           floatingControlFrameClass,
-          "pointer-events-auto flex items-center"
+          "pointer-events-auto absolute -top-11 right-0 flex items-center sm:static"
         )}
       >
         <Tooltip>
@@ -2274,14 +2824,6 @@ function MapHeader({
             Export GPX
           </TooltipContent>
         </Tooltip>
-        <Button
-          aria-label="More actions"
-          variant="ghost"
-          size="icon-sm"
-          className={pillControlButtonClass}
-        >
-          <MoreHorizontal />
-        </Button>
       </div>
     </header>
   )
@@ -2308,10 +2850,10 @@ function ToolHint({
   return (
     <div
       className={cn(
-        "pointer-events-auto absolute left-1/2 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-2 border border-white/[0.1] bg-[#101010] p-1.5 text-[11px] text-foreground/85 backdrop-blur-md",
+        "sidebar-aware-center pointer-events-auto absolute left-1/2 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-2 border border-white/[0.1] bg-[#101010] p-1.5 text-xs leading-4 text-foreground/85 backdrop-blur-md",
         tool === "draw"
-          ? "top-[52px] rounded-t-[4px] rounded-b-[10px] border-t-0 shadow-[0_16px_30px_rgba(0,0,0,0.32)]"
-          : "top-16 rounded-[10px] shadow-xl",
+          ? "top-[96px] rounded-[10px] sm:top-[52px] sm:rounded-t-[4px] sm:rounded-b-[10px] sm:border-t-0"
+          : "top-[108px] rounded-[10px] sm:top-16",
         message && "pl-3"
       )}
     >
@@ -2321,11 +2863,12 @@ function ToolHint({
           type="button"
           role="switch"
           aria-checked={autoRouting}
-          aria-label={`Turn auto-routing ${autoRouting ? "off" : "on"}`}
+          aria-label="Auto-route"
           className="flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-foreground focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:outline-none"
           onClick={() => onAutoRoutingChange(!autoRouting)}
         >
-          <span>Auto-routing</span>
+          <Waypoints className="size-3.5 text-muted-foreground" />
+          <span>Auto-route</span>
           <span
             aria-hidden="true"
             className={cn(
@@ -2358,46 +2901,59 @@ function ToolHint({
 function ElevationPanel({
   track,
   stats,
+  unitSystem,
   open,
+  hoveredPointIndex,
+  onHoveredPointChange,
   onOpenChange,
 }: {
   track: GpxTrack
   stats: ReturnType<typeof calculateTrackStats>
+  unitSystem: UnitSystem
   open: boolean
+  hoveredPointIndex: number | null
+  onHoveredPointChange: (pointIndex: number | null) => void
   onOpenChange: (open: boolean) => void
 }) {
   if (!open) {
     return (
       <button
         type="button"
+        aria-label="Open elevation profile"
         className={cn(
           floatingControlFrameClass,
-          "absolute bottom-4 left-1/2 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center text-xs whitespace-nowrap"
+          "sidebar-aware-center absolute bottom-3 left-1/2 z-20 flex max-w-[calc(100%-24px)] -translate-x-1/2 items-center text-xs whitespace-nowrap"
         )}
         onClick={() => onOpenChange(true)}
       >
-        <span className="flex h-8 min-w-0 items-center gap-3 rounded-[6px] px-2">
-          <span className="flex min-w-0 items-center gap-2">
+        <span className="flex h-8 min-w-0 items-center gap-2 rounded-[6px] px-2">
+          <span className="hidden min-w-0 items-center gap-2 min-[520px]:flex">
             <Route className="size-4 shrink-0" style={{ color: track.color }} />
-            <span className="max-w-[180px] truncate font-medium">
+            <span className="max-w-[150px] truncate font-medium">
               {track.folder} / {track.name}
             </span>
           </span>
           <span
             aria-hidden="true"
-            className="h-4 w-px shrink-0 self-center bg-white/10"
+            className="hidden h-4 w-px shrink-0 self-center bg-white/10 min-[520px]:block"
           />
-          <Metric icon={Ruler} value={`${stats.distanceKm.toFixed(1)} km`} />
-          <Metric icon={TrendingUp} value={`${Math.round(stats.ascentM)} m`} />
+          <Metric
+            icon={Ruler}
+            value={formatDistance(stats.distanceKm, unitSystem)}
+          />
+          <Metric
+            icon={TrendingUp}
+            value={formatElevation(stats.ascentM, unitSystem)}
+          />
           <Metric
             icon={TrendingDown}
-            value={`${Math.round(stats.descentM)} m`}
+            value={formatElevation(stats.descentM, unitSystem)}
           />
           <span
             aria-hidden="true"
             className="h-4 w-px shrink-0 self-center bg-white/10"
           />
-          <span className="text-muted-foreground">View more</span>
+          <span className="text-muted-foreground">Profile</span>
           <ChevronUp className="size-3.5" />
         </span>
       </button>
@@ -2405,39 +2961,49 @@ function ElevationPanel({
   }
 
   return (
-    <section className="absolute bottom-4 left-1/2 z-20 h-[236px] w-[min(920px,calc(100%-32px))] -translate-x-1/2 animate-in overflow-hidden rounded-xl border border-[#3a4149] bg-[#101316]/98 shadow-[0_24px_80px_rgba(0,0,0,0.58)] backdrop-blur-md duration-300 fade-in slide-in-from-bottom-3">
-      <header className="flex h-11 items-center justify-between pr-3 pl-4">
+    <section
+      aria-label={`Elevation profile for ${track.name}`}
+      className="sidebar-aware-center absolute bottom-3 left-1/2 z-20 h-[172px] w-[min(760px,calc(100%-24px))] -translate-x-1/2 overflow-hidden rounded-xl border border-white/[0.1] bg-[#101316]/96 backdrop-blur-md"
+    >
+      <header className="flex h-10 items-center justify-between border-b border-white/[0.06] px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Route className="size-4 shrink-0" style={{ color: track.color }} />
           <span className="truncate text-xs font-medium">
             {track.folder} / {track.name}
           </span>
         </div>
-        <div className="ml-4 flex shrink-0 items-center gap-2">
-          <div className="hidden h-11 items-center gap-3 px-2 sm:flex">
-            <Metric icon={Ruler} value={`${stats.distanceKm.toFixed(1)} km`} />
-            <span className="h-4 w-px bg-white/10" />
+        <div className="ml-3 flex shrink-0 items-center gap-2">
+          <div className="hidden items-center gap-3 min-[560px]:flex">
+            <Metric
+              icon={Ruler}
+              value={formatDistance(stats.distanceKm, unitSystem)}
+            />
             <Metric
               icon={TrendingUp}
-              value={`${Math.round(stats.ascentM)} m`}
+              value={formatElevation(stats.ascentM, unitSystem)}
             />
-            <span className="h-4 w-px bg-white/10" />
             <Metric
               icon={TrendingDown}
-              value={`${Math.round(stats.descentM)} m`}
+              value={formatElevation(stats.descentM, unitSystem)}
             />
           </div>
           <button
             type="button"
             aria-label="Collapse elevation profile"
-            className="grid size-7 place-items-center rounded-lg bg-[#2d2d2d] text-[#d6dbe0] transition-colors hover:bg-[#383838] focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:outline-none"
+            className="grid size-7 place-items-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-white/[0.08] hover:text-foreground focus-visible:ring-2 focus-visible:ring-white/30"
             onClick={() => onOpenChange(false)}
           >
             <ChevronDown className="size-3.5" />
           </button>
         </div>
       </header>
-      <ElevationChart track={track} stats={stats} />
+      <ElevationChart
+        track={track}
+        stats={stats}
+        unitSystem={unitSystem}
+        hoveredPointIndex={hoveredPointIndex}
+        onHoveredPointChange={onHoveredPointChange}
+      />
     </section>
   )
 }
@@ -2450,7 +3016,7 @@ function Metric({
   value: string
 }) {
   return (
-    <span className="flex items-center gap-1.5 font-mono text-[11px] whitespace-nowrap">
+    <span className="flex items-center gap-1.5 font-mono text-xs leading-4 whitespace-nowrap">
       <Icon className="size-3.5 text-muted-foreground" />
       {value}
     </span>
@@ -2502,27 +3068,42 @@ function smoothElevationPath(points: readonly (readonly [number, number])[]) {
 function ElevationChart({
   track,
   stats,
+  unitSystem,
+  hoveredPointIndex,
+  onHoveredPointChange,
 }: {
   track: GpxTrack
   stats: ReturnType<typeof calculateTrackStats>
+  unitSystem: UnitSystem
+  hoveredPointIndex: number | null
+  onHoveredPointChange: (pointIndex: number | null) => void
 }) {
   const plotRef = React.useRef<HTMLDivElement>(null)
-  const defaultPointIndex = Math.floor((track.coordinates.length - 1) / 2)
-  const [hoveredPointIndex, setHoveredPointIndex] = React.useState<
-    number | null
-  >(null)
-  const activePointIndex = hoveredPointIndex ?? defaultPointIndex
+  const activePointIndex = hoveredPointIndex ?? 0
   const width = 1000
-  const height = 126
-  const rawTickStep = Math.max(1, (stats.highestM - stats.lowestM) / 3)
+  const height = 84
+  const displayedHighestElevation = convertElevation(
+    stats.highestM,
+    unitSystem
+  )
+  const displayedLowestElevation = convertElevation(
+    stats.lowestM,
+    unitSystem
+  )
+  const rawTickStep = Math.max(
+    1,
+    (displayedHighestElevation - displayedLowestElevation) / 2
+  )
   const tickScale = 10 ** Math.floor(Math.log10(rawTickStep))
   const tickStep = Math.ceil(rawTickStep / tickScale) * tickScale
-  let chartMaximum = Math.ceil(stats.highestM / tickStep) * tickStep
-  let chartMinimum = chartMaximum - tickStep * 3
+  let chartMaximum =
+    Math.ceil(displayedHighestElevation / tickStep) * tickStep
+  let chartMinimum = chartMaximum - tickStep * 2
 
-  if (chartMinimum > stats.lowestM) {
-    chartMinimum = Math.floor(stats.lowestM / tickStep) * tickStep
-    chartMaximum = chartMinimum + tickStep * 3
+  if (chartMinimum > displayedLowestElevation) {
+    chartMinimum =
+      Math.floor(displayedLowestElevation / tickStep) * tickStep
+    chartMaximum = chartMinimum + tickStep * 2
   }
 
   const range = Math.max(1, chartMaximum - chartMinimum)
@@ -2531,7 +3112,11 @@ function ElevationChart({
       track.coordinates.length > 1
         ? (index / (track.coordinates.length - 1)) * width
         : 0
-    const y = height - ((coordinate[2] - chartMinimum) / range) * height
+    const y =
+      height -
+      ((convertElevation(coordinate[2], unitSystem) - chartMinimum) /
+        range) *
+        height
     return [x, y] as const
   })
   const linePath = smoothElevationPath(points)
@@ -2559,7 +3144,10 @@ function ElevationChart({
     [track.coordinates]
   )
   const activePoint = points[activePointIndex] ?? [0, height]
-  const activeCoordinate = track.coordinates[activePointIndex]
+  const activeCoordinate =
+    hoveredPointIndex === null
+      ? null
+      : track.coordinates[activePointIndex]
   const activeDistance = distances[activePointIndex] ?? 0
   const activePercent =
     track.coordinates.length > 1
@@ -2569,10 +3157,13 @@ function ElevationChart({
   const yTicks = [
     chartMaximum,
     chartMaximum - tickStep,
-    chartMaximum - tickStep * 2,
     chartMinimum,
   ]
-  const xTicks = [0, 0.25, 0.5, 0.75, 1]
+  const xTicks = [0, 0.5, 1]
+  const distanceFractionDigits =
+    convertDistance(stats.distanceKm, unitSystem) < 10 ? 1 : 0
+  const lowestElevation = Math.round(displayedLowestElevation)
+  const highestElevation = Math.round(displayedHighestElevation)
 
   const updateHoveredPoint = (event: React.PointerEvent<HTMLDivElement>) => {
     const bounds = plotRef.current?.getBoundingClientRect()
@@ -2582,25 +3173,25 @@ function ElevationChart({
       1,
       Math.max(0, (event.clientX - bounds.left) / bounds.width)
     )
-    setHoveredPointIndex(
+    onHoveredPointChange(
       Math.round(relativeX * Math.max(0, track.coordinates.length - 1))
     )
   }
 
   return (
-    <div className="relative h-[192px] bg-[#101316]">
+    <div className="relative h-[132px] bg-[#101316]">
       <div
         ref={plotRef}
-        className="absolute top-[34px] right-6 bottom-8 left-16 touch-none"
+        className="absolute top-[30px] right-4 bottom-7 left-12 touch-none"
         onPointerEnter={updateHoveredPoint}
         onPointerMove={updateHoveredPoint}
-        onPointerLeave={() => setHoveredPointIndex(null)}
+        onPointerLeave={() => onHoveredPointChange(null)}
       >
-        {[0, 1, 2, 3].map((lineIndex) => (
+        {[0, 1, 2].map((lineIndex) => (
           <div
             key={lineIndex}
-            className="absolute right-0 left-0 border-t border-[#2e333b]/70"
-            style={{ top: `${lineIndex * 33.333}%` }}
+            className="absolute right-0 left-0 border-t border-white/[0.07]"
+            style={{ top: `${lineIndex * 50}%` }}
           />
         ))}
         <svg
@@ -2608,49 +3199,47 @@ function ElevationChart({
           preserveAspectRatio="none"
           className="absolute inset-0 size-full overflow-visible"
           role="img"
-          aria-label={`Elevation ranges from ${Math.round(stats.lowestM)} to ${Math.round(stats.highestM)} meters`}
+          aria-label={`Elevation ranges from ${lowestElevation} to ${highestElevation} ${elevationUnitName(unitSystem)}`}
         >
-          <path d={areaPath} fill={`${track.color}1f`} />
+          <path d={areaPath} fill={`${track.color}18`} />
           <path
             d={linePath}
             fill="none"
             stroke={track.color}
-            strokeWidth="2.5"
+            strokeWidth="2"
             vectorEffect="non-scaling-stroke"
             strokeLinejoin="round"
             strokeLinecap="round"
           />
-          <line
-            x1={activePoint[0]}
-            x2={activePoint[0]}
-            y1={0}
-            y2={height}
-            stroke={track.color}
-            strokeOpacity="0.5"
-            strokeWidth="1"
-            vectorEffect="non-scaling-stroke"
-          />
-          <circle
-            cx={activePoint[0]}
-            cy={activePoint[1]}
-            r="6"
-            fill="#101316"
-            stroke={track.color}
-            strokeWidth="2.5"
-            vectorEffect="non-scaling-stroke"
-          />
-          <circle
-            cx={activePoint[0]}
-            cy={activePoint[1]}
-            r="2"
-            fill={track.color}
-          />
+          {activeCoordinate && (
+            <>
+              <line
+                x1={activePoint[0]}
+                x2={activePoint[0]}
+                y1={0}
+                y2={height}
+                stroke={track.color}
+                strokeOpacity="0.45"
+                strokeWidth="1"
+                vectorEffect="non-scaling-stroke"
+              />
+              <circle
+                cx={activePoint[0]}
+                cy={activePoint[1]}
+                r="4"
+                fill="#101316"
+                stroke={track.color}
+                strokeWidth="2"
+                vectorEffect="non-scaling-stroke"
+              />
+            </>
+          )}
         </svg>
         {xTicks.map((fraction, index) => (
           <span
             key={fraction}
             className={cn(
-              "absolute top-[calc(100%+8px)] font-mono text-xs text-[#737d8a]",
+              "absolute top-[calc(100%+6px)] font-mono text-[10px] text-white/55 tabular-nums",
               index === 0
                 ? "left-0"
                 : index === xTicks.length - 1
@@ -2663,25 +3252,29 @@ function ElevationChart({
                 : undefined
             }
           >
-            {(stats.distanceKm * fraction).toFixed(0)} km
+            {formatDistance(
+              stats.distanceKm * fraction,
+              unitSystem,
+              fraction === 0 ? 0 : distanceFractionDigits
+            )}
           </span>
         ))}
         {activeCoordinate && (
           <div
-            className="pointer-events-none absolute -top-[30px] z-10 flex h-7 -translate-x-1/2 items-center rounded-[7px] border border-white/10 bg-[#2d2d2d] px-2.5 font-mono text-[11px] font-medium whitespace-nowrap text-[#ebedf2] shadow-sm"
+            className="pointer-events-none absolute -top-6 z-10 flex h-6 -translate-x-1/2 items-center rounded-md border border-white/10 bg-[#25282d] px-2 font-mono text-[10px] font-medium whitespace-nowrap text-[#f2f3f5] tabular-nums"
             style={{ left: `${tooltipPercent}%` }}
           >
-            {activeDistance.toFixed(1)} km
+            {formatDistance(activeDistance, unitSystem)}
             <span className="mx-2 text-white/55">·</span>
-            {Math.round(activeCoordinate[2])} m
+            {formatElevation(activeCoordinate[2], unitSystem)}
           </div>
         )}
       </div>
       {yTicks.map((tick, index) => (
         <span
           key={`${tick}-${index}`}
-          className="absolute left-5 -translate-y-1/2 font-mono text-xs text-[#737d8a]"
-          style={{ top: `${34 + index * 42}px` }}
+          className="absolute left-3 -translate-y-1/2 font-mono text-[10px] text-white/55 tabular-nums"
+          style={{ top: `${30 + index * 37}px` }}
         >
           {Math.round(tick)}
         </span>

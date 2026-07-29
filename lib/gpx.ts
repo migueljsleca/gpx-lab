@@ -14,6 +14,7 @@ export type GpxTrack = {
   color: string
   visible: boolean
   coordinates: TrackCoordinate[]
+  anchorIndices?: number[]
 }
 
 export type TrackStats = {
@@ -83,18 +84,38 @@ function distanceToSegmentMeters(
   return Math.hypot(pointX - progress * endX, pointY - progress * endY)
 }
 
-export function simplifyTrackCoordinates(
+export function simplifyTrackCoordinateIndices(
   coordinates: TrackCoordinate[],
-  toleranceMeters = 10
+  toleranceMeters = 10,
+  requiredIndices: readonly number[] = []
 ) {
+  if (coordinates.length === 0) {
+    return []
+  }
+
   if (coordinates.length <= 2) {
-    return coordinates.slice()
+    return coordinates.map((_, index) => index)
   }
 
   const keep = new Uint8Array(coordinates.length)
-  keep[0] = 1
-  keep[coordinates.length - 1] = 1
-  const ranges: [number, number][] = [[0, coordinates.length - 1]]
+  const fixedIndices = Array.from(
+    new Set([
+      0,
+      coordinates.length - 1,
+      ...requiredIndices.filter(
+        (index) =>
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < coordinates.length
+      ),
+    ])
+  ).sort((first, second) => first - second)
+  fixedIndices.forEach((index) => {
+    keep[index] = 1
+  })
+  const ranges: [number, number][] = fixedIndices
+    .slice(0, -1)
+    .map((startIndex, index) => [startIndex, fixedIndices[index + 1]])
 
   while (ranges.length > 0) {
     const [startIndex, endIndex] = ranges.pop()!
@@ -120,7 +141,48 @@ export function simplifyTrackCoordinates(
     }
   }
 
-  return coordinates.filter((_, index) => keep[index] === 1)
+  return Array.from(keep.keys()).filter((index) => keep[index] === 1)
+}
+
+export function simplifyTrackCoordinates(
+  coordinates: TrackCoordinate[],
+  toleranceMeters = 10,
+  requiredIndices: readonly number[] = []
+) {
+  return simplifyTrackCoordinateIndices(
+    coordinates,
+    toleranceMeters,
+    requiredIndices
+  ).map((index) => coordinates[index])
+}
+
+export function getTrackAnchorIndices(
+  track: GpxTrack,
+  fallbackToleranceMeters = 10
+) {
+  if (track.coordinates.length === 0) {
+    return []
+  }
+
+  if (track.anchorIndices === undefined) {
+    return simplifyTrackCoordinateIndices(
+      track.coordinates,
+      fallbackToleranceMeters
+    )
+  }
+
+  return Array.from(
+    new Set([
+      0,
+      track.coordinates.length - 1,
+      ...track.anchorIndices.filter(
+        (index) =>
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < track.coordinates.length
+      ),
+    ])
+  ).sort((first, second) => first - second)
 }
 
 export function cleanTrackCoordinates(coordinates: TrackCoordinate[]) {
