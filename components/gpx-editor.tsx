@@ -150,6 +150,21 @@ function clampSidebarWidth(width: number) {
   return Math.min(sidebarMaxWidth, Math.max(sidebarMinWidth, width))
 }
 
+function getTrackExportFilename(track: GpxTrack) {
+  const sanitizeSegment = (value: string) =>
+    value
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+      .replace(/\.+$/g, "")
+      .trim()
+
+  const folderName = sanitizeSegment(track.folder) || "Routes"
+  const routeName = sanitizeSegment(track.name) || "Untitled route"
+
+  return `${folderName} - ${routeName}.gpx`
+}
+
 function cloneTracks(tracks: GpxTrack[]) {
   return tracks.map((track) => ({
     ...track,
@@ -1198,11 +1213,12 @@ export function GpxEditor() {
     })
     const href = URL.createObjectURL(blob)
     const link = document.createElement("a")
+    const filename = getTrackExportFilename(activeTrack)
     link.href = href
-    link.download = `${activeTrack.name.replaceAll(/\s+/g, "-").toLowerCase()}.gpx`
+    link.download = filename
     link.click()
     URL.revokeObjectURL(href)
-    setNotice(`Exported ${activeTrack.name}.gpx`)
+    setNotice(`Exported ${filename}`)
   }
 
   function createFolder(name: string) {
