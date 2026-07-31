@@ -2,15 +2,16 @@
 
 import * as React from "react"
 import type {
+  ExpressionSpecification,
+  GeoJSONSourceDiff,
+  GeoJSONSource,
   Map as MapLibreMap,
+  MapLayerMouseEvent,
   MapMouseEvent,
   StyleSpecification,
 } from "maplibre-gl"
 
-import {
-  type MapStyleId,
-  type RouteLineWeight,
-} from "@/lib/editor-preferences"
+import { type MapStyleId, type RouteLineWeight } from "@/lib/editor-preferences"
 import {
   getTrackAnchorIndices,
   type EditorTool,
@@ -57,6 +58,10 @@ const enhancedBasemapLineColors = {
   "Road bridge": "#4a4f54",
 } as const
 const trackSelectionWidth = 20
+const trackSourceId = "gpx-tracks"
+const trackCasingLayerId = "gpx-track-casing"
+const trackLineLayerId = "gpx-track-lines"
+const trackHitLayerId = "gpx-track-hit-area"
 const routeLineStrokeWidths: Record<
   RouteLineWeight,
   {
@@ -69,6 +74,139 @@ const routeLineStrokeWidths: Record<
   thin: { inactive: 1, casing: 4, active: 2, preview: 1.5 },
   standard: { inactive: 2.5, casing: 8, active: 4.5, preview: 3.5 },
   bold: { inactive: 5, casing: 14, active: 8, preview: 6 },
+}
+
+type TrackLineProperties = {
+  id: string
+  color: string
+}
+
+function createTrackFeature(
+  track: GpxTrack
+): GeoJSON.Feature<GeoJSON.LineString, TrackLineProperties> {
+  return {
+    type: "Feature",
+    id: track.id,
+    properties: {
+      id: track.id,
+      color: track.color,
+    },
+    geometry: {
+      type: "LineString",
+      coordinates: track.coordinates.map(([longitude, latitude]) => [
+        longitude,
+        latitude,
+      ]),
+    },
+  }
+}
+
+function createTrackFeatureCollection(
+  tracks: GpxTrack[]
+): GeoJSON.FeatureCollection<GeoJSON.LineString, TrackLineProperties> {
+  return {
+    type: "FeatureCollection",
+    features: tracks
+      .filter((track) => track.visible && track.coordinates.length > 0)
+      .map(createTrackFeature),
+  }
+}
+
+function ensureTrackLayers(map: MapLibreMap) {
+  if (!map.getSource(trackSourceId)) {
+    map.addSource(trackSourceId, {
+      type: "geojson",
+      data: {
+        type: "FeatureCollection",
+        features: [],
+      },
+    })
+  }
+
+  if (!map.getLayer(trackCasingLayerId)) {
+    map.addLayer({
+      id: trackCasingLayerId,
+      type: "line",
+      source: trackSourceId,
+      filter: ["==", ["get", "id"], ""],
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+      },
+      paint: {
+        "line-color": "#ffffff",
+        "line-opacity": 0.65,
+        "line-width": routeLineStrokeWidths.standard.casing,
+      },
+    })
+  }
+
+  if (!map.getLayer(trackLineLayerId)) {
+    map.addLayer({
+      id: trackLineLayerId,
+      type: "line",
+      source: trackSourceId,
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+      },
+      paint: {
+        "line-color": ["get", "color"],
+        "line-opacity": 0.56,
+        "line-width": routeLineStrokeWidths.standard.inactive,
+      },
+    })
+  }
+
+  if (!map.getLayer(trackHitLayerId)) {
+    map.addLayer({
+      id: trackHitLayerId,
+      type: "line",
+      source: trackSourceId,
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+      },
+      paint: {
+        "line-color": "#000000",
+        "line-opacity": 0.001,
+        "line-width": trackSelectionWidth,
+      },
+    })
+  }
+}
+
+function updateTrackLayerAppearance(
+  map: MapLibreMap,
+  activeTrackId: string,
+  routeLineWeight: RouteLineWeight
+) {
+  const strokeWidths = routeLineStrokeWidths[routeLineWeight]
+
+  if (map.getLayer(trackCasingLayerId)) {
+    map.setFilter(trackCasingLayerId, ["==", ["get", "id"], activeTrackId])
+    map.setPaintProperty(trackCasingLayerId, "line-width", strokeWidths.casing)
+  }
+
+  if (map.getLayer(trackLineLayerId)) {
+    const isActiveTrack: ExpressionSpecification = [
+      "==",
+      ["get", "id"],
+      activeTrackId,
+    ]
+    map.setPaintProperty(trackLineLayerId, "line-width", [
+      "case",
+      isActiveTrack,
+      strokeWidths.active,
+      strokeWidths.inactive,
+    ])
+    map.setPaintProperty(trackLineLayerId, "line-opacity", [
+      "case",
+      isActiveTrack,
+      1,
+      0.56,
+    ])
+  }
 }
 
 function softenBasemapWater(map: MapLibreMap) {
@@ -208,10 +346,7 @@ function enhanceSettlementLabelContrast(map: MapLibreMap) {
   }
 }
 
-function updateMountainPeakUnits(
-  map: MapLibreMap,
-  unitSystem: UnitSystem
-) {
+function updateMountainPeakUnits(map: MapLibreMap, unitSystem: UnitSystem) {
   const layerId = "Mountain peak labels"
   if (!map.getLayer(layerId)) {
     return
@@ -219,10 +354,7 @@ function updateMountainPeakUnits(
 
   const elevation =
     unitSystem === "imperial"
-      ? [
-          "round",
-          ["*", ["to-number", ["get", "ele"]], metersToFeet],
-        ]
+      ? ["round", ["*", ["to-number", ["get", "ele"]], metersToFeet]]
       : ["get", "ele"]
 
   map.setLayoutProperty(layerId, "text-field", [
@@ -242,10 +374,7 @@ function updateMountainPeakUnits(
   ])
 }
 
-function addMountainPeakLabels(
-  map: MapLibreMap,
-  unitSystem: UnitSystem
-) {
+function addMountainPeakLabels(map: MapLibreMap, unitSystem: UnitSystem) {
   if (!mountainPeakSourceUrl) {
     return
   }
@@ -386,11 +515,8 @@ type MapCanvasProps = {
   onToolMessage: (message: string) => void
 }
 
-type ProjectedTrack = {
-  id: string
+type ProjectedActiveTrack = {
   color: string
-  active: boolean
-  path: string
   start: [number, number]
   end: [number, number]
   points: { index: number; position: [number, number] }[]
@@ -443,8 +569,11 @@ export function MapCanvas({
   const initialUnitSystemRef = React.useRef(unitSystem)
   const unitSystemRef = React.useRef(unitSystem)
   const appliedMapStyleRef = React.useRef<MapStyleId | null>(null)
+  const renderedTracksRef = React.useRef(new Map<string, GpxTrack>())
+  const renderedStyleRevisionRef = React.useRef(-1)
   const [mapInstance, setMapInstance] = React.useState<MapLibreMap | null>(null)
   const [ready, setReady] = React.useState(false)
+  const [styleRevision, setStyleRevision] = React.useState(0)
   const interactionScope = `${activeTrackId}:${activeTool}`
   const [cropAnchor, setCropAnchor] = React.useState<{
     scope: string
@@ -458,19 +587,8 @@ export function MapCanvas({
     cropAnchor?.scope === interactionScope ? cropAnchor.index : null
   const drawPreviewPosition =
     drawPreview?.scope === interactionScope ? drawPreview.position : null
-  const [projectedTracks, setProjectedTracks] = React.useState<
-    ProjectedTrack[]
-  >([])
-  const anchorIndicesByTrackId = React.useMemo(
-    () =>
-      new Map(
-        tracks.map((track) => [
-          track.id,
-          new Set(getTrackAnchorIndices(track)),
-        ])
-      ),
-    [tracks]
-  )
+  const [projectedActiveTrack, setProjectedActiveTrack] =
+    React.useState<ProjectedActiveTrack | null>(null)
   const hoveredTrack = tracks.find((track) => track.id === activeTrackId)
   const hoveredTrackCoordinate =
     hoveredElevationPointIndex === null
@@ -487,6 +605,79 @@ export function MapCanvas({
         }
       : null
   const routeStrokeWidths = routeLineStrokeWidths[routeLineWeight]
+  const selectTrackFromMap = React.useEffectEvent(
+    (event: MapLayerMouseEvent) => {
+      if (activeTool !== "select") {
+        return
+      }
+
+      const trackId = event.features?.[0]?.properties?.id
+      if (typeof trackId === "string") {
+        onSelectTrack(trackId)
+      }
+    }
+  )
+  const handleMapClickEvent = React.useEffectEvent((event: MapMouseEvent) => {
+    const map = mapRef.current
+    const activeTrack = tracks.find((track) => track.id === activeTrackId)
+
+    if (activeTool === "draw") {
+      if (event.originalEvent.detail > 1) {
+        return
+      }
+      const elevation = activeTrack?.coordinates.at(-1)?.[2] ?? 0
+      onAddPoint([event.lngLat.lng, event.lngLat.lat, elevation])
+      return
+    }
+
+    if (
+      !map ||
+      (activeTool !== "split" && activeTool !== "crop") ||
+      !activeTrack
+    ) {
+      return
+    }
+
+    const nearest = nearestTrackPointIndex(map, activeTrack, event.point)
+    if (nearest.index === -1 || nearest.distance > 36) {
+      onToolMessage("Click closer to the active route")
+      return
+    }
+
+    if (activeTool === "split") {
+      onSplit(nearest.index)
+      return
+    }
+
+    if (cropAnchorIndex === null) {
+      setCropAnchor({ scope: interactionScope, index: nearest.index })
+      onToolMessage("Now click the other end of the section to keep")
+    } else {
+      onCrop(cropAnchorIndex, nearest.index)
+      setCropAnchor(null)
+    }
+  })
+  const handleMapMouseMoveEvent = React.useEffectEvent(
+    (event: MapMouseEvent) => {
+      if (activeTool === "draw") {
+        setDrawPreview({
+          scope: interactionScope,
+          position: [event.point.x, event.point.y],
+        })
+      }
+    }
+  )
+  const handleMapMouseLeaveEvent = React.useEffectEvent(() => {
+    setDrawPreview(null)
+  })
+  const handleMapDoubleClickEvent = React.useEffectEvent(
+    (event: MapMouseEvent) => {
+      if (activeTool === "draw") {
+        event.preventDefault()
+        onFinishDrawing()
+      }
+    }
+  )
 
   React.useEffect(() => {
     unitSystemRef.current = unitSystem
@@ -585,6 +776,7 @@ export function MapCanvas({
       map.once("style.load", () => {
         if (!cancelled && mapRef.current === map) {
           enhanceMapStyle(map, unitSystemRef.current)
+          setStyleRevision((revision) => revision + 1)
           map.triggerRepaint()
         }
       })
@@ -603,47 +795,165 @@ export function MapCanvas({
     }
   }, [mapInstance, ready, unitSystem])
 
-  const updateProjectedTracks = React.useCallback(() => {
+  React.useEffect(() => {
+    const map = mapInstance
+
+    if (!map || !ready) {
+      return
+    }
+
+    ensureTrackLayers(map)
+    const source = map.getSource(trackSourceId) as GeoJSONSource | undefined
+    if (!source) {
+      return
+    }
+
+    const visibleTracks = tracks.filter(
+      (track) => track.visible && track.coordinates.length > 0
+    )
+    const nextTracksById = new Map(
+      visibleTracks.map((track) => [track.id, track])
+    )
+
+    if (renderedStyleRevisionRef.current !== styleRevision) {
+      void source.setData(createTrackFeatureCollection(visibleTracks))
+      renderedTracksRef.current = nextTracksById
+      renderedStyleRevisionRef.current = styleRevision
+      return
+    }
+
+    const diff: GeoJSONSourceDiff = {}
+    const removedTrackIds = Array.from(renderedTracksRef.current.keys()).filter(
+      (trackId) => !nextTracksById.has(trackId)
+    )
+    const addedTracks: GeoJSON.Feature[] = []
+    const updatedTracks: NonNullable<GeoJSONSourceDiff["update"]> = []
+
+    for (const track of visibleTracks) {
+      const previousTrack = renderedTracksRef.current.get(track.id)
+      if (!previousTrack) {
+        addedTracks.push(createTrackFeature(track))
+        continue
+      }
+
+      const geometryChanged = previousTrack.coordinates !== track.coordinates
+      const colorChanged = previousTrack.color !== track.color
+      if (!geometryChanged && !colorChanged) {
+        continue
+      }
+
+      updatedTracks.push({
+        id: track.id,
+        ...(geometryChanged
+          ? { newGeometry: createTrackFeature(track).geometry }
+          : {}),
+        ...(colorChanged
+          ? {
+              addOrUpdateProperties: [{ key: "color", value: track.color }],
+            }
+          : {}),
+      })
+    }
+
+    if (removedTrackIds.length > 0) {
+      diff.remove = removedTrackIds
+    }
+    if (addedTracks.length > 0) {
+      diff.add = addedTracks
+    }
+    if (updatedTracks.length > 0) {
+      diff.update = updatedTracks
+    }
+    if (diff.remove || diff.add || diff.update) {
+      void source.updateData(diff)
+    }
+
+    renderedTracksRef.current = nextTracksById
+  }, [mapInstance, ready, styleRevision, tracks])
+
+  React.useEffect(() => {
+    const map = mapInstance
+
+    if (!map || !ready) {
+      return
+    }
+
+    ensureTrackLayers(map)
+    updateTrackLayerAppearance(map, activeTrackId, routeLineWeight)
+  }, [activeTrackId, mapInstance, ready, routeLineWeight, styleRevision])
+
+  React.useEffect(() => {
+    const map = mapInstance
+
+    if (!map || !ready || !map.getLayer(trackHitLayerId)) {
+      return
+    }
+
+    const canvas = map.getCanvas()
+    const handleClick = (event: MapLayerMouseEvent) => {
+      selectTrackFromMap(event)
+    }
+    const handleMouseEnter = () => {
+      if (activeTool === "select") {
+        canvas.style.cursor = "pointer"
+      }
+    }
+    const handleMouseLeave = () => {
+      if (activeTool === "select") {
+        canvas.style.cursor = ""
+      }
+    }
+
+    map.on("click", trackHitLayerId, handleClick)
+    map.on("mouseenter", trackHitLayerId, handleMouseEnter)
+    map.on("mouseleave", trackHitLayerId, handleMouseLeave)
+
+    return () => {
+      map.off("click", trackHitLayerId, handleClick)
+      map.off("mouseenter", trackHitLayerId, handleMouseEnter)
+      map.off("mouseleave", trackHitLayerId, handleMouseLeave)
+    }
+  }, [activeTool, mapInstance, ready, styleRevision])
+
+  const updateProjectedActiveTrack = React.useCallback(() => {
     const map = mapRef.current
 
     if (!map) {
       return
     }
 
-    setProjectedTracks(
-      tracks
-        .filter((track) => track.visible && track.coordinates.length > 0)
-        .map((track) => {
-          const points = track.coordinates.map(([longitude, latitude]) => {
-            const point = map.project([longitude, latitude])
-            return [point.x, point.y] as [number, number]
-          })
-          const anchorIndices =
-            anchorIndicesByTrackId.get(track.id) ?? new Set<number>()
+    const activeTrack = tracks.find((track) => track.id === activeTrackId)
+    if (
+      !activeTrack ||
+      !activeTrack.visible ||
+      activeTrack.coordinates.length === 0
+    ) {
+      setProjectedActiveTrack(null)
+      return
+    }
 
-          return {
-            id: track.id,
-            color: track.color,
-            active: track.id === activeTrackId,
-            path: points
-              .map(
-                ([x, y], index) =>
-                  `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`
-              )
-              .join(" "),
-            start: points[0],
-            end: points.at(-1)!,
-            points: points
-              .map((position, index) => ({ index, position }))
-              .filter(
-                ({ index }) =>
-                  anchorIndices.has(index) ||
-                  (track.id === activeTrackId && index === cropAnchorIndex)
-              ),
-          }
-        })
-    )
-  }, [activeTrackId, anchorIndicesByTrackId, cropAnchorIndex, tracks])
+    const startCoordinate = activeTrack.coordinates[0]
+    const endCoordinate = activeTrack.coordinates.at(-1)!
+    const start = map.project([startCoordinate[0], startCoordinate[1]])
+    const end = map.project([endCoordinate[0], endCoordinate[1]])
+    const pointIndices =
+      activeTool === "draw"
+        ? getTrackAnchorIndices(activeTrack)
+        : cropAnchorIndex === null
+          ? []
+          : [cropAnchorIndex]
+
+    setProjectedActiveTrack({
+      color: activeTrack.color,
+      start: [start.x, start.y],
+      end: [end.x, end.y],
+      points: pointIndices.map((index) => {
+        const coordinate = activeTrack.coordinates[index]
+        const position = map.project([coordinate[0], coordinate[1]])
+        return { index, position: [position.x, position.y] }
+      }),
+    })
+  }, [activeTool, activeTrackId, cropAnchorIndex, tracks])
 
   React.useEffect(() => {
     const map = mapRef.current
@@ -652,19 +962,18 @@ export function MapCanvas({
       return
     }
 
-    map.on("move", updateProjectedTracks)
-    map.on("resize", updateProjectedTracks)
-    updateProjectedTracks()
+    map.on("move", updateProjectedActiveTrack)
+    map.on("resize", updateProjectedActiveTrack)
+    updateProjectedActiveTrack()
 
     return () => {
-      map.off("move", updateProjectedTracks)
-      map.off("resize", updateProjectedTracks)
+      map.off("move", updateProjectedActiveTrack)
+      map.off("resize", updateProjectedActiveTrack)
     }
-  }, [ready, updateProjectedTracks])
+  }, [ready, updateProjectedActiveTrack])
 
   React.useEffect(() => {
     const map = mapRef.current
-    const activeTrack = tracks.find((track) => track.id === activeTrackId)
 
     if (!map || !ready) {
       return
@@ -684,57 +993,19 @@ export function MapCanvas({
     }
 
     function handleClick(event: MapMouseEvent) {
-      if (activeTool === "draw") {
-        if (event.originalEvent.detail > 1) {
-          return
-        }
-        const elevation = activeTrack?.coordinates.at(-1)?.[2] ?? 0
-        onAddPoint([event.lngLat.lng, event.lngLat.lat, elevation])
-        return
-      }
-
-      if ((activeTool !== "split" && activeTool !== "crop") || !activeTrack) {
-        return
-      }
-
-      const nearest = nearestTrackPointIndex(map!, activeTrack, event.point)
-      if (nearest.index === -1 || nearest.distance > 36) {
-        onToolMessage("Click closer to the active route")
-        return
-      }
-
-      if (activeTool === "split") {
-        onSplit(nearest.index)
-        return
-      }
-
-      if (cropAnchorIndex === null) {
-        setCropAnchor({ scope: interactionScope, index: nearest.index })
-        onToolMessage("Now click the other end of the section to keep")
-      } else {
-        onCrop(cropAnchorIndex, nearest.index)
-        setCropAnchor(null)
-      }
+      handleMapClickEvent(event)
     }
 
     function handleMouseMove(event: MapMouseEvent) {
-      if (activeTool === "draw") {
-        setDrawPreview({
-          scope: interactionScope,
-          position: [event.point.x, event.point.y],
-        })
-      }
+      handleMapMouseMoveEvent(event)
     }
 
     function handleMouseLeave() {
-      setDrawPreview(null)
+      handleMapMouseLeaveEvent()
     }
 
     function handleDoubleClick(event: MapMouseEvent) {
-      if (activeTool === "draw") {
-        event.preventDefault()
-        onFinishDrawing()
-      }
+      handleMapDoubleClickEvent(event)
     }
 
     map.on("click", handleClick)
@@ -752,19 +1023,7 @@ export function MapCanvas({
         map.doubleClickZoom.enable()
       }
     }
-  }, [
-    activeTool,
-    activeTrackId,
-    cropAnchorIndex,
-    interactionScope,
-    onAddPoint,
-    onCrop,
-    onFinishDrawing,
-    onSplit,
-    onToolMessage,
-    ready,
-    tracks,
-  ])
+  }, [activeTool, ready])
 
   React.useEffect(() => {
     const map = mapRef.current
@@ -856,133 +1115,70 @@ export function MapCanvas({
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 z-[2] size-full overflow-visible"
       >
-        {projectedTracks
-          .filter((track) => !track.active)
-          .map((track) => (
-            <g key={track.id}>
-              <path
-                d={track.path}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={trackSelectionWidth}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{
-                  pointerEvents: activeTool === "select" ? "stroke" : "none",
-                  cursor: activeTool === "select" ? "pointer" : undefined,
-                }}
-                onClick={() => onSelectTrack(track.id)}
-              />
-              <path
-                d={track.path}
-                fill="none"
-                stroke={track.color}
-                strokeWidth={routeStrokeWidths.inactive}
-                strokeOpacity="0.56"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </g>
-          ))}
-        {projectedTracks
-          .filter((track) => track.active)
-          .map((track) => (
-            <g key={track.id}>
-              <path
-                d={track.path}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={trackSelectionWidth}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{
-                  pointerEvents: activeTool === "select" ? "stroke" : "none",
-                  cursor: activeTool === "select" ? "pointer" : undefined,
-                }}
-                onClick={() => onSelectTrack(track.id)}
-              />
-              <path
-                d={track.path}
-                fill="none"
-                stroke="white"
-                strokeWidth={routeStrokeWidths.casing}
-                strokeOpacity="0.65"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d={track.path}
-                fill="none"
-                stroke={track.color}
-                strokeWidth={routeStrokeWidths.active}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <circle
-                cx={track.start[0]}
-                cy={track.start[1]}
-                r="5"
-                fill="#f4f4f5"
-                stroke="#121418"
-                strokeWidth="2"
-              />
-              <circle
-                cx={track.end[0]}
-                cy={track.end[1]}
-                r="5"
-                fill={track.color}
-                stroke="#121418"
-                strokeWidth="2"
-              />
-              {activeTool === "draw" &&
-                track.points.map(({ index, position }) => (
+        {projectedActiveTrack && (
+          <g>
+            <circle
+              cx={projectedActiveTrack.start[0]}
+              cy={projectedActiveTrack.start[1]}
+              r="5"
+              fill="#f4f4f5"
+              stroke="#121418"
+              strokeWidth="2"
+            />
+            <circle
+              cx={projectedActiveTrack.end[0]}
+              cy={projectedActiveTrack.end[1]}
+              r="5"
+              fill={projectedActiveTrack.color}
+              stroke="#121418"
+              strokeWidth="2"
+            />
+            {activeTool === "draw" &&
+              projectedActiveTrack.points.map(({ index, position }) => (
+                <circle
+                  key={index}
+                  cx={position[0]}
+                  cy={position[1]}
+                  r="4"
+                  fill="#181b20"
+                  stroke="#ffffff"
+                  strokeWidth="1.5"
+                  className="pointer-events-auto cursor-grab drop-shadow-md active:cursor-grabbing"
+                  onPointerDown={beginPointDrag}
+                  onPointerMove={(event) => movePoint(event, index)}
+                  onPointerUp={finishPointDrag}
+                  onPointerCancel={finishPointDrag}
+                />
+              ))}
+            {activeTool === "crop" &&
+              cropAnchorIndex !== null &&
+              projectedActiveTrack.points
+                .filter(({ index }) => index === cropAnchorIndex)
+                .map(({ index, position }) => (
                   <circle
-                    key={index}
+                    key={`crop-${index}`}
                     cx={position[0]}
                     cy={position[1]}
-                    r="4"
-                    fill="#181b20"
+                    r="8"
+                    fill={projectedActiveTrack.color}
                     stroke="#ffffff"
-                    strokeWidth="1.5"
-                    className="pointer-events-auto cursor-grab drop-shadow-md active:cursor-grabbing"
-                    onPointerDown={beginPointDrag}
-                    onPointerMove={(event) => movePoint(event, index)}
-                    onPointerUp={finishPointDrag}
-                    onPointerCancel={finishPointDrag}
+                    strokeWidth="2"
                   />
                 ))}
-              {activeTool === "crop" &&
-                cropAnchorIndex !== null &&
-                track.points
-                  .filter(({ index }) => index === cropAnchorIndex)
-                  .map(({ index, position }) => (
-                    <circle
-                      key={`crop-${index}`}
-                      cx={position[0]}
-                      cy={position[1]}
-                      r="8"
-                      fill={track.color}
-                      stroke="#ffffff"
-                      strokeWidth="2"
-                    />
-                  ))}
-            </g>
-          ))}
+          </g>
+        )}
         {activeTool === "draw" &&
           drawPreviewPosition &&
-          projectedTracks
-            .filter((track) => track.active)
-            .map((track) => (
-              <path
-                key={`preview-${track.id}`}
-                d={`M ${track.end[0]} ${track.end[1]} L ${drawPreviewPosition[0]} ${drawPreviewPosition[1]}`}
-                fill="none"
-                stroke={track.color}
-                strokeWidth={routeStrokeWidths.preview}
-                strokeDasharray="5 5"
-                strokeOpacity="0.8"
-              />
-            ))}
+          projectedActiveTrack && (
+            <path
+              d={`M ${projectedActiveTrack.end[0]} ${projectedActiveTrack.end[1]} L ${drawPreviewPosition[0]} ${drawPreviewPosition[1]}`}
+              fill="none"
+              stroke={projectedActiveTrack.color}
+              strokeWidth={routeStrokeWidths.preview}
+              strokeDasharray="5 5"
+              strokeOpacity="0.8"
+            />
+          )}
         {hoveredTrackPoint && (
           <g
             data-elevation-hover-marker

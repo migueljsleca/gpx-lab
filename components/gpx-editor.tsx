@@ -124,6 +124,7 @@ const pillControlButtonClass =
   "hover:bg-white/[0.1] active:bg-white/[0.1] dark:hover:bg-white/[0.1] dark:active:bg-white/[0.1]"
 const sidebarMinWidth = 260
 const sidebarMaxWidth = 320
+const workspaceSaveDelayMs = 400
 const trackColorLabels: Record<string, string> = {
   "#FF7470": "Coral",
   "#FF8F5B": "Orange",
@@ -225,10 +226,10 @@ export function GpxEditor() {
     index: number
   } | null>(null)
   const [autoRouting, setAutoRouting] = React.useState(true)
-  const [mapStyle, setMapStyle] =
-    React.useState<MapStyleId>(defaultMapStyle)
-  const [routeLineWeight, setRouteLineWeight] =
-    React.useState<RouteLineWeight>(defaultRouteLineWeight)
+  const [mapStyle, setMapStyle] = React.useState<MapStyleId>(defaultMapStyle)
+  const [routeLineWeight, setRouteLineWeight] = React.useState<RouteLineWeight>(
+    defaultRouteLineWeight
+  )
   const [unitSystem, setUnitSystem] =
     React.useState<UnitSystem>(defaultUnitSystem)
   const [fileDragActive, setFileDragActive] = React.useState(false)
@@ -248,8 +249,7 @@ export function GpxEditor() {
   const activeTrack =
     tracks.find((track) => track.id === activeTrackId) ?? tracks[0]
   const hoveredElevationPointIndex =
-    hoveredElevationPoint &&
-    hoveredElevationPoint.trackId === activeTrack?.id
+    hoveredElevationPoint && hoveredElevationPoint.trackId === activeTrack?.id
       ? hoveredElevationPoint.index
       : null
   const stats = React.useMemo(
@@ -324,9 +324,7 @@ export function GpxEditor() {
             ? (workspace.mapStyle ?? defaultMapStyle)
             : defaultMapStyle
         )
-        setRouteLineWeight(
-          workspace.routeLineWeight ?? defaultRouteLineWeight
-        )
+        setRouteLineWeight(workspace.routeLineWeight ?? defaultRouteLineWeight)
         setUnitSystem(workspace.unitSystem ?? defaultUnitSystem)
       })
       .catch((error) => {
@@ -384,11 +382,15 @@ export function GpxEditor() {
       unitSystem,
     }
 
-    void saveWorkspace(workspace).catch((error) => {
-      persistenceDisabledRef.current = true
-      console.error("[Workspace] Could not save state", error)
-      setNotice("Changes could not be saved in this browser")
-    })
+    const saveTimeout = window.setTimeout(() => {
+      void saveWorkspace(workspace).catch((error) => {
+        persistenceDisabledRef.current = true
+        console.error("[Workspace] Could not save state", error)
+        setNotice("Changes could not be saved in this browser")
+      })
+    }, workspaceSaveDelayMs)
+
+    return () => window.clearTimeout(saveTimeout)
   }, [
     activeTrackId,
     autoRouting,
@@ -1979,7 +1981,7 @@ function SettingsMenu({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] text-foreground/90 outline-none transition-[color,background-color] hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30 data-[state=open]:bg-white/[0.08]"
+            className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] text-foreground/90 transition-[color,background-color] outline-none hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30 data-[state=open]:bg-white/[0.08]"
           >
             <Settings className="size-4" />
             <span>Settings</span>
@@ -2006,9 +2008,7 @@ function SettingsMenu({
             >
               <DropdownMenuRadioGroup
                 value={mapStyle}
-                onValueChange={(value) =>
-                  onMapStyleChange(value as MapStyleId)
-                }
+                onValueChange={(value) => onMapStyleChange(value as MapStyleId)}
               >
                 {mapStyleIds.map((styleId) => (
                   <DropdownMenuRadioItem
@@ -2085,9 +2085,7 @@ function SettingsMenu({
               menuItemClass,
               "[&>[data-slot=dropdown-menu-checkbox-item-indicator]]:hidden"
             )}
-            onCheckedChange={(checked) =>
-              onAutoRoutingChange(checked === true)
-            }
+            onCheckedChange={(checked) => onAutoRoutingChange(checked === true)}
             onSelect={(event) => event.preventDefault()}
           >
             <Waypoints className="size-4 text-muted-foreground" />
@@ -2095,7 +2093,7 @@ function SettingsMenu({
             <span
               aria-hidden="true"
               className={cn(
-                "relative ml-auto h-3.5 w-6 overflow-hidden rounded-full ring-1 ring-inset transition-colors duration-150",
+                "relative ml-auto h-3.5 w-6 overflow-hidden rounded-full ring-1 transition-colors duration-150 ring-inset",
                 autoRouting
                   ? "bg-[#f1f2f3] ring-white/90"
                   : "bg-[#30343a] ring-white/10"
@@ -2157,7 +2155,7 @@ function SettingsMenu({
               <AlertDialog.Action asChild>
                 <button
                   type="button"
-                  className="inline-flex h-8 items-center justify-center rounded-lg bg-[#d84a4a] px-3 text-xs font-medium text-white outline-none transition-[background-color,transform] hover:bg-[#e05555] focus-visible:ring-2 focus-visible:ring-white/35 active:scale-[0.96]"
+                  className="inline-flex h-8 items-center justify-center rounded-lg bg-[#d84a4a] px-3 text-xs font-medium text-white transition-[background-color,transform] outline-none hover:bg-[#e05555] focus-visible:ring-2 focus-visible:ring-white/35 active:scale-[0.96]"
                   onClick={onClearWorkspace}
                 >
                   Clear workspace
@@ -2186,7 +2184,7 @@ function SidebarAction({
     <button
       type="button"
       className={cn(
-        "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] outline-none transition-[color,background-color] focus-visible:ring-2 focus-visible:ring-white/30",
+        "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] leading-4 font-[450] transition-[color,background-color] outline-none focus-visible:ring-2 focus-visible:ring-white/30",
         active
           ? "bg-white/[0.08] text-foreground"
           : "text-foreground/90 hover:bg-white/[0.06]"
@@ -2660,7 +2658,7 @@ function TrackColorPicker({
           draggable={false}
           aria-label={`Change color for ${trackName}`}
           title="Change track color"
-          className="grid size-7 shrink-0 place-items-center rounded-md outline-none transition-colors hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30"
+          className="grid size-7 shrink-0 place-items-center rounded-md transition-colors outline-none hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30"
         >
           <Route className="size-4" style={muted ? undefined : { color }} />
         </button>
@@ -2687,7 +2685,7 @@ function TrackColorPicker({
                   aria-pressed={selected}
                   title={trackColorLabels[trackColor]}
                   className={cn(
-                    "grid size-7 place-items-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
+                    "grid size-7 place-items-center rounded-full transition-transform outline-none hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/35",
                     selected &&
                       "ring-2 ring-white/90 ring-offset-1 ring-offset-[#181b20]"
                   )}
@@ -2990,7 +2988,7 @@ function ElevationPanel({
           <button
             type="button"
             aria-label="Collapse elevation profile"
-            className="grid size-7 place-items-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-white/[0.08] hover:text-foreground focus-visible:ring-2 focus-visible:ring-white/30"
+            className="grid size-7 place-items-center rounded-lg text-muted-foreground transition-colors outline-none hover:bg-white/[0.08] hover:text-foreground focus-visible:ring-2 focus-visible:ring-white/30"
             onClick={() => onOpenChange(false)}
           >
             <ChevronDown className="size-3.5" />
@@ -3065,6 +3063,52 @@ function smoothElevationPath(points: readonly (readonly [number, number])[]) {
   }, "")
 }
 
+function getElevationChartSampleIndices(
+  coordinates: readonly TrackCoordinate[],
+  maxPoints = 1200
+) {
+  if (coordinates.length <= maxPoints) {
+    return coordinates.map((_, index) => index)
+  }
+
+  const bucketCount = Math.max(1, Math.floor((maxPoints - 2) / 2))
+  const bucketSize = (coordinates.length - 2) / bucketCount
+  const sampledIndices = [0]
+
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const startIndex = 1 + Math.floor(bucket * bucketSize)
+    const endIndex = Math.min(
+      coordinates.length - 1,
+      1 + Math.floor((bucket + 1) * bucketSize)
+    )
+    if (startIndex >= endIndex) {
+      continue
+    }
+
+    let lowestIndex = startIndex
+    let highestIndex = startIndex
+    for (let index = startIndex + 1; index < endIndex; index += 1) {
+      if (coordinates[index][2] < coordinates[lowestIndex][2]) {
+        lowestIndex = index
+      }
+      if (coordinates[index][2] > coordinates[highestIndex][2]) {
+        highestIndex = index
+      }
+    }
+
+    if (lowestIndex < highestIndex) {
+      sampledIndices.push(lowestIndex, highestIndex)
+    } else if (highestIndex < lowestIndex) {
+      sampledIndices.push(highestIndex, lowestIndex)
+    } else {
+      sampledIndices.push(lowestIndex)
+    }
+  }
+
+  sampledIndices.push(coordinates.length - 1)
+  return sampledIndices
+}
+
 function ElevationChart({
   track,
   stats,
@@ -3079,75 +3123,83 @@ function ElevationChart({
   onHoveredPointChange: (pointIndex: number | null) => void
 }) {
   const plotRef = React.useRef<HTMLDivElement>(null)
+  const hoverFrameRef = React.useRef<number | null>(null)
+  const pendingHoverIndexRef = React.useRef<number | null>(null)
+  const lastHoverIndexRef = React.useRef<number | null>(null)
   const activePointIndex = hoveredPointIndex ?? 0
   const width = 1000
   const height = 84
-  const displayedHighestElevation = convertElevation(
-    stats.highestM,
-    unitSystem
-  )
-  const displayedLowestElevation = convertElevation(
-    stats.lowestM,
-    unitSystem
-  )
+  const displayedHighestElevation = convertElevation(stats.highestM, unitSystem)
+  const displayedLowestElevation = convertElevation(stats.lowestM, unitSystem)
   const rawTickStep = Math.max(
     1,
     (displayedHighestElevation - displayedLowestElevation) / 2
   )
   const tickScale = 10 ** Math.floor(Math.log10(rawTickStep))
   const tickStep = Math.ceil(rawTickStep / tickScale) * tickScale
-  let chartMaximum =
-    Math.ceil(displayedHighestElevation / tickStep) * tickStep
+  let chartMaximum = Math.ceil(displayedHighestElevation / tickStep) * tickStep
   let chartMinimum = chartMaximum - tickStep * 2
 
   if (chartMinimum > displayedLowestElevation) {
-    chartMinimum =
-      Math.floor(displayedLowestElevation / tickStep) * tickStep
+    chartMinimum = Math.floor(displayedLowestElevation / tickStep) * tickStep
     chartMaximum = chartMinimum + tickStep * 2
   }
 
-  const range = Math.max(1, chartMaximum - chartMinimum)
-  const points = track.coordinates.map((coordinate, index) => {
-    const x =
-      track.coordinates.length > 1
-        ? (index / (track.coordinates.length - 1)) * width
-        : 0
-    const y =
-      height -
-      ((convertElevation(coordinate[2], unitSystem) - chartMinimum) /
-        range) *
-        height
-    return [x, y] as const
-  })
-  const linePath = smoothElevationPath(points)
-  const areaPath = `${linePath} L ${width} ${height} L 0 ${height} Z`
-  const distances = React.useMemo(
-    () =>
-      track.coordinates.reduce(
-        (result, coordinate, index) => {
-          const total =
-            index === 0
-              ? 0
-              : result.total +
-                distanceBetweenTrackCoordinates(
-                  track.coordinates[index - 1],
-                  coordinate
-                )
+  const chartMinimumValue = chartMinimum
+  const chartMaximumValue = chartMaximum
+  const range = Math.max(1, chartMaximumValue - chartMinimumValue)
+  const { linePath, areaPath } = React.useMemo(() => {
+    const points = getElevationChartSampleIndices(track.coordinates).map(
+      (index) => {
+        const coordinate = track.coordinates[index]
+        const x =
+          track.coordinates.length > 1
+            ? (index / (track.coordinates.length - 1)) * width
+            : 0
+        const y =
+          height -
+          ((convertElevation(coordinate[2], unitSystem) - chartMinimumValue) /
+            range) *
+            height
+        return [x, y] as const
+      }
+    )
+    const nextLinePath = smoothElevationPath(points)
+    return {
+      linePath: nextLinePath,
+      areaPath: `${nextLinePath} L ${width} ${height} L 0 ${height} Z`,
+    }
+  }, [chartMinimumValue, range, track.coordinates, unitSystem])
+  const distances = React.useMemo(() => {
+    const values = new Array<number>(track.coordinates.length)
+    let total = 0
 
-          return {
-            total,
-            values: [...result.values, total],
-          }
-        },
-        { total: 0, values: [] as number[] }
-      ).values,
-    [track.coordinates]
-  )
-  const activePoint = points[activePointIndex] ?? [0, height]
+    for (let index = 0; index < track.coordinates.length; index += 1) {
+      if (index > 0) {
+        total += distanceBetweenTrackCoordinates(
+          track.coordinates[index - 1],
+          track.coordinates[index]
+        )
+      }
+      values[index] = total
+    }
+
+    return values
+  }, [track.coordinates])
   const activeCoordinate =
-    hoveredPointIndex === null
-      ? null
-      : track.coordinates[activePointIndex]
+    hoveredPointIndex === null ? null : track.coordinates[activePointIndex]
+  const activePoint = activeCoordinate
+    ? ([
+        track.coordinates.length > 1
+          ? (activePointIndex / (track.coordinates.length - 1)) * width
+          : 0,
+        height -
+          ((convertElevation(activeCoordinate[2], unitSystem) -
+            chartMinimumValue) /
+            range) *
+            height,
+      ] as const)
+    : ([0, height] as const)
   const activeDistance = distances[activePointIndex] ?? 0
   const activePercent =
     track.coordinates.length > 1
@@ -3155,15 +3207,42 @@ function ElevationChart({
       : 0
   const tooltipPercent = Math.min(92, Math.max(8, activePercent))
   const yTicks = [
-    chartMaximum,
-    chartMaximum - tickStep,
-    chartMinimum,
+    chartMaximumValue,
+    chartMaximumValue - tickStep,
+    chartMinimumValue,
   ]
   const xTicks = [0, 0.5, 1]
   const distanceFractionDigits =
     convertDistance(stats.distanceKm, unitSystem) < 10 ? 1 : 0
   const lowestElevation = Math.round(displayedLowestElevation)
   const highestElevation = Math.round(displayedHighestElevation)
+
+  React.useEffect(
+    () => () => {
+      if (hoverFrameRef.current !== null) {
+        window.cancelAnimationFrame(hoverFrameRef.current)
+      }
+    },
+    []
+  )
+
+  const scheduleHoveredPoint = (pointIndex: number | null) => {
+    pendingHoverIndexRef.current = pointIndex
+    if (hoverFrameRef.current !== null) {
+      return
+    }
+
+    hoverFrameRef.current = window.requestAnimationFrame(() => {
+      hoverFrameRef.current = null
+      const nextPointIndex = pendingHoverIndexRef.current
+      if (lastHoverIndexRef.current === nextPointIndex) {
+        return
+      }
+
+      lastHoverIndexRef.current = nextPointIndex
+      onHoveredPointChange(nextPointIndex)
+    })
+  }
 
   const updateHoveredPoint = (event: React.PointerEvent<HTMLDivElement>) => {
     const bounds = plotRef.current?.getBoundingClientRect()
@@ -3173,7 +3252,7 @@ function ElevationChart({
       1,
       Math.max(0, (event.clientX - bounds.left) / bounds.width)
     )
-    onHoveredPointChange(
+    scheduleHoveredPoint(
       Math.round(relativeX * Math.max(0, track.coordinates.length - 1))
     )
   }
@@ -3185,7 +3264,7 @@ function ElevationChart({
         className="absolute top-[30px] right-4 bottom-7 left-12 touch-none"
         onPointerEnter={updateHoveredPoint}
         onPointerMove={updateHoveredPoint}
-        onPointerLeave={() => onHoveredPointChange(null)}
+        onPointerLeave={() => scheduleHoveredPoint(null)}
       >
         {[0, 1, 2].map((lineIndex) => (
           <div
